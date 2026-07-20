@@ -9,6 +9,7 @@ import (
 func TestApplyFileHyperVConfig(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	data := `hyperv:
+  secureBoot: linux
   image: D:\images\win11.vhdx
   user: Administrator
   workRoot: D:\crabbox-work
@@ -33,6 +34,9 @@ func TestApplyFileHyperVConfig(t *testing.T) {
 		cfg.HyperV.WorkRoot != `D:\crabbox-work` || cfg.HyperV.CPUs != 6 || cfg.HyperV.Memory != 4096 ||
 		cfg.HyperV.Switch != "Lab Switch" || cfg.HyperV.GuestPassword != "file-secret" {
 		t.Fatalf("hyperv=%#v", cfg.HyperV)
+	}
+	if cfg.HyperV.SecureBoot != "linux" {
+		t.Fatalf("secureBoot=%q", cfg.HyperV.SecureBoot)
 	}
 	if !cfg.HyperV.InitPassword {
 		t.Fatal("hyperv.initPassword: true not applied from config file")
@@ -60,6 +64,7 @@ func TestApplyFileHyperVInitPasswordTriState(t *testing.T) {
 }
 
 func TestHyperVEnvConfig(t *testing.T) {
+	t.Setenv("CRABBOX_HYPERV_SECURE_BOOT", "off")
 	t.Setenv("CRABBOX_HYPERV_IMAGE", `E:\img\base.vhdx`)
 	t.Setenv("CRABBOX_HYPERV_USER", "EnvUser")
 	t.Setenv("CRABBOX_HYPERV_WORK_ROOT", `E:\work`)
@@ -76,6 +81,9 @@ func TestHyperVEnvConfig(t *testing.T) {
 		cfg.HyperV.WorkRoot != `E:\work` || cfg.HyperV.CPUs != 8 || cfg.HyperV.Memory != 2048 ||
 		cfg.HyperV.Switch != "Env Switch" || cfg.HyperV.GuestPassword != "env-secret" {
 		t.Fatalf("hyperv=%#v", cfg.HyperV)
+	}
+	if cfg.HyperV.SecureBoot != "off" {
+		t.Fatalf("secureBoot=%q", cfg.HyperV.SecureBoot)
 	}
 	if !cfg.HyperV.InitPassword {
 		t.Fatal("CRABBOX_HYPERV_INIT_PASSWORD=true not applied")
@@ -135,5 +143,49 @@ func TestLoadConfigPreservesExplicitHyperVTargetForCLIOverride(t *testing.T) {
 	}
 	if cfg.TargetOS != targetLinux || !IsTargetExplicit(&cfg) {
 		t.Fatalf("explicit target was rewritten: target=%q explicit=%v", cfg.TargetOS, IsTargetExplicit(&cfg))
+	}
+}
+
+func TestLoadConfigAppliesHyperVLinuxDefaults(t *testing.T) {
+	clearConfigEnv(t)
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("provider: hyperv\ntarget: linux\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CRABBOX_CONFIG", path)
+	t.Setenv("CRABBOX_PROVIDER", "")
+	t.Setenv("CRABBOX_TARGET", "")
+	t.Setenv("CRABBOX_TARGET_OS", "")
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TargetOS != targetLinux || cfg.WorkRoot != defaultPOSIXWorkRoot || cfg.HyperV.WorkRoot != defaultPOSIXWorkRoot {
+		t.Fatalf("target=%q workRoot=%q hyperv.workRoot=%q, want Linux POSIX defaults", cfg.TargetOS, cfg.WorkRoot, cfg.HyperV.WorkRoot)
+	}
+	if cfg.SSHUser != "crabbox" || cfg.HyperV.SecureBoot != "auto" {
+		t.Fatalf("user=%q secureBoot=%q", cfg.SSHUser, cfg.HyperV.SecureBoot)
+	}
+}
+
+func TestLoadConfigPreservesExplicitHyperVLinuxWorkRoot(t *testing.T) {
+	clearConfigEnv(t)
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	data := "provider: hyperv\ntarget: linux\nhyperv:\n  workRoot: /srv/crabbox\n"
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CRABBOX_CONFIG", path)
+	t.Setenv("CRABBOX_PROVIDER", "")
+	t.Setenv("CRABBOX_TARGET", "")
+	t.Setenv("CRABBOX_TARGET_OS", "")
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.WorkRoot != "/srv/crabbox" || cfg.HyperV.WorkRoot != "/srv/crabbox" {
+		t.Fatalf("workRoot=%q hyperv.workRoot=%q", cfg.WorkRoot, cfg.HyperV.WorkRoot)
 	}
 }

@@ -65,7 +65,7 @@ func TestResumeSavedGuestStartsWaitsAndRefreshesChangedIP(t *testing.T) {
 			events = append(events, "ip")
 		}
 	}
-	b.sshReady = func(_ context.Context, target *SSHTarget, phase string, _ time.Duration) error {
+	b.sshReady = func(_ context.Context, target *SSHTarget, _ io.Writer, phase string, _ time.Duration) error {
 		events = append(events, "ssh:"+target.Host)
 		readyHost = target.Host
 		if phase != "hyperv resume" {
@@ -108,7 +108,7 @@ func TestResumeSavedGuestStartsWaitsAndRefreshesChangedIP(t *testing.T) {
 func TestResumeRunningGuestIsIdempotent(t *testing.T) {
 	b, runner, leaseID, name := pauseTestLease(t, hypervStateRunning, "192.0.2.10")
 	runner.respond = hyperVStateResponder(name, hypervStateRunning, "192.0.2.10")
-	b.sshReady = func(context.Context, *SSHTarget, string, time.Duration) error { return nil }
+	b.sshReady = func(context.Context, *SSHTarget, io.Writer, string, time.Duration) error { return nil }
 
 	if err := b.Resume(context.Background(), ResumeRequest{ID: leaseID}); err != nil {
 		t.Fatalf("Resume: %v", err)
@@ -121,7 +121,7 @@ func TestResumeRunningGuestIsIdempotent(t *testing.T) {
 func TestResumeRejectsConcurrentClaimChange(t *testing.T) {
 	b, _, leaseID, name := pauseTestLease(t, hypervStateSaved, "192.0.2.10")
 	b.rt.Exec = &recordingRunner{respond: hyperVStateResponder(name, hypervStateSaved, "192.0.2.55")}
-	b.sshReady = func(_ context.Context, _ *SSHTarget, _ string, _ time.Duration) error {
+	b.sshReady = func(_ context.Context, _ *SSHTarget, _ io.Writer, _ string, _ time.Duration) error {
 		claim, ok, err := resolveLeaseClaimForProvider(leaseID, providerName)
 		if err != nil || !ok {
 			t.Fatalf("resolve claim: ok=%v err=%v", ok, err)
@@ -152,7 +152,7 @@ func TestResumeRejectsConcurrentClaimChange(t *testing.T) {
 func TestResumePausedGuestUsesResumeVM(t *testing.T) {
 	b, runner, leaseID, name := pauseTestLease(t, hypervStatePaused, "192.0.2.10")
 	runner.respond = hyperVStateResponder(name, hypervStatePaused, "192.0.2.10")
-	b.sshReady = func(context.Context, *SSHTarget, string, time.Duration) error { return nil }
+	b.sshReady = func(context.Context, *SSHTarget, io.Writer, string, time.Duration) error { return nil }
 
 	if err := b.Resume(context.Background(), ResumeRequest{ID: leaseID}); err != nil {
 		t.Fatalf("Resume: %v", err)
