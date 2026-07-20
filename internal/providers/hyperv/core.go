@@ -22,6 +22,8 @@ type ListRequest = core.ListRequest
 type LeaseView = core.LeaseView
 type ReleaseLeaseRequest = core.ReleaseLeaseRequest
 type TouchRequest = core.TouchRequest
+type PauseRequest = core.PauseRequest
+type ResumeRequest = core.ResumeRequest
 type LeaseTarget = core.LeaseTarget
 type Server = core.Server
 type SSHTarget = core.SSHTarget
@@ -72,6 +74,17 @@ func touchDirectLeaseLabels(labels map[string]string, cfg Config, state string, 
 
 func claimLeaseForRepoProviderScopePondEndpoint(leaseID, slug, provider, providerScope, pond, repoRoot string, idleTimeout time.Duration, reclaim bool, server Server, target SSHTarget) error {
 	return core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, slug, provider, providerScope, pond, repoRoot, idleTimeout, reclaim, server, target)
+}
+
+func updateLeaseClaimEndpointIfUnchanged(leaseID string, expected core.LeaseClaim, server Server, target SSHTarget) error {
+	updated, err := core.UpdateLeaseClaimEndpointIfUnchanged(leaseID, expected, server, target)
+	if err != nil {
+		return err
+	}
+	if updated.LeaseID != leaseID || updated.SSHHost != target.Host {
+		return exit(4, "hyperv lease %q endpoint refresh did not persist host %q", leaseID, target.Host)
+	}
+	return nil
 }
 
 func resolveLeaseClaimForProvider(identifier, provider string) (core.LeaseClaim, bool, error) {
