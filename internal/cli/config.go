@@ -1344,6 +1344,7 @@ type HyperVConfig struct {
 	Image         string
 	User          string
 	WorkRoot      string
+	SecureBoot    string
 	CPUs          int
 	Memory        int
 	Switch        string
@@ -2145,6 +2146,9 @@ func applyProviderConfigDefaults(cfg *Config) error {
 			cfg.TargetOS = targetWindows
 		}
 		cfg.SSHFallbackPorts = nil
+		if cfg.TargetOS == targetLinux && isDefaultWorkRoot(cfg.HyperV.WorkRoot) {
+			cfg.HyperV.WorkRoot = defaultPOSIXWorkRoot
+		}
 		if cfg.HyperV.User != "" {
 			cfg.SSHUser = cfg.HyperV.User
 		}
@@ -3318,11 +3322,12 @@ func baseConfig() Config {
 			WorkRoot: "/Users/lume/crabbox",
 		},
 		HyperV: HyperVConfig{
-			User:     "crabbox",
-			WorkRoot: defaultWindowsWorkRoot,
-			CPUs:     4,
-			Memory:   8192,
-			Switch:   "Default Switch",
+			User:       "crabbox",
+			WorkRoot:   defaultWindowsWorkRoot,
+			CPUs:       4,
+			Memory:     8192,
+			Switch:     "Default Switch",
+			SecureBoot: "auto",
 		},
 		WindowsSandbox: WindowsSandboxConfig{
 			Workdir:            `C:\crabbox-work`,
@@ -4627,6 +4632,7 @@ type fileHyperVConfig struct {
 	Image         string `yaml:"image,omitempty"`
 	User          string `yaml:"user,omitempty"`
 	WorkRoot      string `yaml:"workRoot,omitempty"`
+	SecureBoot    string `yaml:"secureBoot,omitempty"`
 	CPUs          int    `yaml:"cpus,omitempty"`
 	Memory        int    `yaml:"memory,omitempty"`
 	Switch        string `yaml:"switch,omitempty"`
@@ -7667,6 +7673,9 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		if file.HyperV.WorkRoot != "" {
 			cfg.HyperV.WorkRoot = file.HyperV.WorkRoot
 		}
+		if file.HyperV.SecureBoot != "" {
+			cfg.HyperV.SecureBoot = file.HyperV.SecureBoot
+		}
 		if file.HyperV.CPUs > 0 {
 			cfg.HyperV.CPUs = file.HyperV.CPUs
 		}
@@ -9617,6 +9626,7 @@ func applyEnv(cfg *Config) error {
 	cfg.HyperV.Image = getenv("CRABBOX_HYPERV_IMAGE", cfg.HyperV.Image)
 	cfg.HyperV.User = getenv("CRABBOX_HYPERV_USER", cfg.HyperV.User)
 	cfg.HyperV.WorkRoot = getenv("CRABBOX_HYPERV_WORK_ROOT", cfg.HyperV.WorkRoot)
+	cfg.HyperV.SecureBoot = getenv("CRABBOX_HYPERV_SECURE_BOOT", cfg.HyperV.SecureBoot)
 	cfg.HyperV.CPUs = getenvInt("CRABBOX_HYPERV_CPUS", cfg.HyperV.CPUs)
 	cfg.HyperV.Memory = getenvInt("CRABBOX_HYPERV_MEMORY", cfg.HyperV.Memory)
 	cfg.HyperV.Switch = getenv("CRABBOX_HYPERV_SWITCH", cfg.HyperV.Switch)

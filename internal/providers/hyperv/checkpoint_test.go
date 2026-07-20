@@ -220,7 +220,7 @@ func TestRestoreNativeCheckpointRefreshesClaimEndpoint(t *testing.T) {
 		}
 	}
 	b := testBackend(runner)
-	b.waitSSHReady = func(context.Context, *SSHTarget, io.Writer, string, time.Duration) error { return nil }
+	b.sshReady = func(context.Context, *SSHTarget, io.Writer, string, time.Duration) error { return nil }
 	persistCheckpointSource(t, b)
 
 	lease, err := b.restoreNativeCheckpoint(context.Background(), core.NativeCheckpointRestoreRequest{
@@ -361,7 +361,7 @@ func TestRestoreNativeCheckpointKeepsReclaimedLeaseAfterVMMutation(t *testing.T)
 		}
 	}
 	b := testBackend(runner)
-	b.waitSSHReady = func(context.Context, *SSHTarget, io.Writer, string, time.Duration) error {
+	b.sshReady = func(context.Context, *SSHTarget, io.Writer, string, time.Duration) error {
 		return errors.New("ssh unavailable")
 	}
 	persistCheckpointSource(t, b)
@@ -411,7 +411,7 @@ func TestForkNativeCheckpointCreatesFreshIdentityAndConnectsNetworkLast(t *testi
 		}
 		return keyPath, "ssh-ed25519 AAAATEST fork@test", nil
 	}
-	b.waitSSHReady = func(context.Context, *SSHTarget, io.Writer, string, time.Duration) error { return nil }
+	b.sshReady = func(context.Context, *SSHTarget, io.Writer, string, time.Duration) error { return nil }
 	oldOS := hypervHostOS
 	hypervHostOS = "windows"
 	t.Cleanup(func() { hypervHostOS = oldOS })

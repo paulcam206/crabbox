@@ -11,6 +11,7 @@ type flagValues struct {
 	Image        *string
 	User         *string
 	WorkRoot     *string
+	SecureBoot   *string
 	CPUs         *int
 	Memory       *int
 	Switch       *string
@@ -19,9 +20,10 @@ type flagValues struct {
 
 func registerFlags(fs *flag.FlagSet, defaults core.Config) any {
 	return flagValues{
-		Image:        fs.String("hyperv-image", defaults.HyperV.Image, "Windows VHDX template path for Hyper-V VM creation"),
-		User:         fs.String("hyperv-user", defaults.HyperV.User, "guest administrator account for SSH (password via CRABBOX_HYPERV_GUEST_PASSWORD)"),
+		Image:        fs.String("hyperv-image", defaults.HyperV.Image, "generalized guest VHDX template path for Hyper-V VM creation"),
+		User:         fs.String("hyperv-user", defaults.HyperV.User, "guest account for SSH"),
 		WorkRoot:     fs.String("hyperv-work-root", defaults.HyperV.WorkRoot, "Crabbox work root inside the guest"),
+		SecureBoot:   fs.String("hyperv-secure-boot", defaults.HyperV.SecureBoot, "secure boot mode: auto, windows, linux, or off"),
 		CPUs:         fs.Int("hyperv-cpu", defaults.HyperV.CPUs, "CPU count for Hyper-V leases"),
 		Memory:       fs.Int("hyperv-memory", defaults.HyperV.Memory, "memory in MB for Hyper-V leases"),
 		Switch:       fs.String("hyperv-switch", defaults.HyperV.Switch, "Hyper-V virtual switch name"),
@@ -42,6 +44,9 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	}
 	if flagWasSet(fs, "hyperv-work-root") {
 		cfg.HyperV.WorkRoot = *v.WorkRoot
+	}
+	if flagWasSet(fs, "hyperv-secure-boot") {
+		cfg.HyperV.SecureBoot = *v.SecureBoot
 	}
 	if flagWasSet(fs, "hyperv-cpu") {
 		cfg.HyperV.CPUs = *v.CPUs

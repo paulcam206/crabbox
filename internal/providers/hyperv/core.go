@@ -32,8 +32,16 @@ type LocalCommandResult = core.LocalCommandResult
 
 const (
 	providerName  = "hyperv"
+	targetLinux   = core.TargetLinux
 	targetWindows = core.TargetWindows
 	sshPort       = "22"
+)
+
+const (
+	secureBootAuto    = "auto"
+	secureBootWindows = "windows"
+	secureBootLinux   = "linux"
+	secureBootOff     = "off"
 )
 
 func exit(code int, format string, args ...any) core.ExitError {
