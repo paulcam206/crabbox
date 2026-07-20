@@ -28,11 +28,14 @@ func (Provider) Spec() core.ProviderSpec {
 }
 
 func providerTargets() []core.TargetSpec {
-	return []core.TargetSpec{{OS: core.TargetWindows, WindowsMode: core.WindowsModeNormal}}
+	return []core.TargetSpec{
+		{OS: core.TargetLinux},
+		{OS: core.TargetWindows, WindowsMode: core.WindowsModeNormal},
+	}
 }
 
 func providerFeatures() core.FeatureSet {
-	return core.FeatureSet{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureCleanup}
+	return core.FeatureSet{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureCleanup, core.FeatureDesktop, core.FeatureBrowser}
 }
 
 func (Provider) RegisterFlags(fs *flag.FlagSet, defaults core.Config) any {
@@ -44,11 +47,17 @@ func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error
 }
 
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
-	if cfg.TargetOS != "" && cfg.TargetOS != core.TargetWindows {
-		return nil, core.Exit(2, "provider=%s supports target=windows only", providerName)
+	if cfg.TargetOS != "" && cfg.TargetOS != core.TargetLinux && cfg.TargetOS != core.TargetWindows {
+		return nil, core.Exit(2, "provider=%s supports target=linux or target=windows", providerName)
 	}
 	if cfg.TargetOS == core.TargetWindows && cfg.WindowsMode != "" && cfg.WindowsMode != core.WindowsModeNormal {
 		return nil, core.Exit(2, "provider=%s supports windows.mode=normal only", providerName)
+	}
+	if cfg.TargetOS == core.TargetLinux && cfg.HyperV.InitPassword {
+		return nil, core.Exit(2, "--hyperv-init-password is supported only for target=windows")
+	}
+	if _, err := secureBootSettings(cfg.TargetOS, cfg.HyperV.SecureBoot); err != nil {
+		return nil, err
 	}
 	if cfg.Tailscale.Enabled || string(cfg.Network) == "tailscale" {
 		return nil, core.Exit(2, "--tailscale is not supported for provider=%s; use a remote SSH provider when tailnet reachability is required", providerName)

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -33,6 +34,7 @@ type backend struct {
 	guestReadyBudget       time.Duration
 	guestInvokeTimeout     time.Duration
 	guestRetryBackoff      time.Duration
+	sshReady               func(context.Context, *SSHTarget, io.Writer, string, time.Duration) error
 }
 
 var hypervHostOS = runtime.GOOS
@@ -61,6 +63,7 @@ func newBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
 		guestReadyBudget:       5 * time.Minute,
 		guestInvokeTimeout:     10 * time.Minute,
 		guestRetryBackoff:      3 * time.Second,
+		sshReady:               waitForSSHReady,
 	}
 }
 
@@ -83,8 +86,16 @@ func applyDefaults(cfg *Config) {
 	if cfg.HyperV.WorkRoot == "" {
 		if !core.IsDefaultWorkRoot(cfg.WorkRoot) {
 			cfg.HyperV.WorkRoot = cfg.WorkRoot
+		} else if cfg.TargetOS == targetLinux {
+			cfg.HyperV.WorkRoot = "/work/crabbox"
 		} else {
 			cfg.HyperV.WorkRoot = `C:\crabbox`
+		}
+	} else if cfg.TargetOS == targetLinux && core.IsDefaultWorkRoot(cfg.HyperV.WorkRoot) {
+		if !core.IsDefaultWorkRoot(cfg.WorkRoot) {
+			cfg.HyperV.WorkRoot = cfg.WorkRoot
+		} else {
+			cfg.HyperV.WorkRoot = "/work/crabbox"
 		}
 	}
 	if cfg.HyperV.CPUs <= 0 {
@@ -96,6 +107,7 @@ func applyDefaults(cfg *Config) {
 	if cfg.HyperV.Switch == "" {
 		cfg.HyperV.Switch = "Default Switch"
 	}
+	cfg.HyperV.SecureBoot = normalizeSecureBootMode(cfg.HyperV.SecureBoot)
 	cfg.SSHUser = cfg.HyperV.User
 	cfg.SSHPort = sshPort
 	cfg.WorkRoot = cfg.HyperV.WorkRoot
@@ -116,10 +128,12 @@ func (b *backend) configForRun() Config {
 
 func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget, error) {
 	switch b.configForRun().TargetOS {
+	case targetLinux:
+		return b.acquireLinux(ctx, req)
 	case targetWindows:
 		return b.acquireWindows(ctx, req)
 	default:
-		return LeaseTarget{}, exit(2, "provider=%s supports target=windows only", providerName)
+		return LeaseTarget{}, exit(2, "provider=%s supports target=linux or target=windows", providerName)
 	}
 }
 
@@ -556,6 +570,9 @@ func (b *backend) createVM(ctx context.Context, cfg Config, name string) error {
 	result, err = b.powershell(ctx, cpuScript)
 	if err != nil {
 		return commandError("Set-VM", result, err)
+	}
+	if err := b.configureVMFirmware(ctx, cfg, name); err != nil {
+		return err
 	}
 
 	startScript := fmt.Sprintf(`Start-VM -Name '%s'`, escapePSString(name))
@@ -999,6 +1016,13 @@ func (b *backend) resolveInstance(ctx context.Context, identifier string) (hyper
 
 func (b *backend) prepareLease(ctx context.Context, cfg Config, inst hypervVM, ip string, claim core.LeaseClaim, wait bool) (LeaseTarget, error) {
 	server := b.serverFromInstance(inst, claim, cfg)
+	switch target := strings.TrimSpace(server.Labels["target"]); target {
+	case targetLinux, targetWindows:
+		cfg.TargetOS = target
+	}
+	if mode := strings.TrimSpace(server.Labels["windows_mode"]); mode != "" {
+		cfg.WindowsMode = mode
+	}
 	if user := strings.TrimSpace(server.Labels["ssh_user"]); user != "" {
 		cfg.HyperV.User = user
 		cfg.SSHUser = user
@@ -1022,8 +1046,11 @@ func (b *backend) prepareLease(ctx context.Context, cfg Config, inst hypervVM, i
 	target := sshTargetFromConfig(cfg, ip)
 	target.Port = sshPort
 	target.FallbackPorts = []string{}
+	if cfg.TargetOS == targetLinux {
+		target.ReadyCheck = "test -x /usr/local/bin/crabbox-ready && /usr/local/bin/crabbox-ready >/tmp/crabbox-ready.log 2>&1"
+	}
 	if wait {
-		if err := waitForSSHReady(ctx, &target, b.rt.Stderr, "hyperv ssh", bootstrapWaitTimeout(cfg)); err != nil {
+		if err := b.sshReady(ctx, &target, b.rt.Stderr, "hyperv ssh", bootstrapWaitTimeout(cfg)); err != nil {
 			return LeaseTarget{}, err
 		}
 		server.Status = "ready"
@@ -1063,12 +1090,16 @@ func (b *backend) removeVMStorage(name string, attachedPaths []string) error {
 	var errs []error
 	vhdDir := hypervVHDDir()
 	expectedVHD := filepath.Join(vhdDir, name+".vhdx")
+	expectedSeed := cloudInitSeedPath(name)
 	if err := b.removeVHDFile(expectedVHD); err != nil {
+		errs = append(errs, err)
+	}
+	if err := b.removeVHDFile(expectedSeed); err != nil {
 		errs = append(errs, err)
 	}
 	for _, p := range attachedPaths {
 		clean := filepath.Clean(p)
-		if strings.EqualFold(clean, filepath.Clean(expectedVHD)) {
+		if strings.EqualFold(clean, filepath.Clean(expectedVHD)) || strings.EqualFold(clean, filepath.Clean(expectedSeed)) {
 			continue
 		}
 		if ownedHyperVCheckpoint(clean, vhdDir, name) {
