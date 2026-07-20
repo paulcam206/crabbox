@@ -120,7 +120,7 @@ func (b *backend) waitForResumedLease(ctx context.Context, name string, claim co
 			return LeaseTarget{}, err
 		}
 		probeTimeout := minDuration(b.resumeSSHProbeTimeout, time.Until(deadline))
-		if err := b.sshReady(ctx, &lease.SSH, "hyperv resume", probeTimeout); err != nil {
+		if err := b.sshReady(ctx, &lease.SSH, b.rt.Stderr, "hyperv resume", probeTimeout); err != nil {
 			lastErr = err
 			if err := b.waitResumePoll(ctx); err != nil {
 				return LeaseTarget{}, err

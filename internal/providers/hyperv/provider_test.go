@@ -87,10 +87,13 @@ func TestProviderSpecAndAliases(t *testing.T) {
 		t.Fatalf("Name=%q want %s", p.Name(), providerName)
 	}
 	want := core.ProviderSpec{
-		Name:    providerName,
-		Family:  "local-vm",
-		Kind:    core.ProviderKindSSHLease,
-		Targets: []core.TargetSpec{{OS: core.TargetWindows, WindowsMode: core.WindowsModeNormal}},
+		Name:   providerName,
+		Family: "local-vm",
+		Kind:   core.ProviderKindSSHLease,
+		Targets: []core.TargetSpec{
+			{OS: core.TargetLinux},
+			{OS: core.TargetWindows, WindowsMode: core.WindowsModeNormal},
+		},
 		Features: core.FeatureSet{
 			core.FeatureSSH,
 			core.FeatureCrabboxSync,
@@ -125,12 +128,12 @@ func TestProviderAliasesResolve(t *testing.T) {
 	}
 }
 
-func TestConfigureRejectsLinux(t *testing.T) {
+func TestConfigureAcceptsLinux(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	cfg.TargetOS = core.TargetLinux
-	if _, err := (Provider{}).Configure(cfg, core.Runtime{}); err == nil {
-		t.Fatal("Configure accepted linux target")
+	if _, err := (Provider{}).Configure(cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: &recordingRunner{}}); err != nil {
+		t.Fatalf("Configure rejected linux target: %v", err)
 	}
 }
 
@@ -584,7 +587,7 @@ func TestCreateVMUsesDifferencingDisk(t *testing.T) {
 		t.Fatalf("createVM: %v", err)
 	}
 
-	var foundDiff, foundNewVM, foundStart, foundConnect, foundInject bool
+	var foundDiff, foundNewVM, foundStart, foundConnect, foundInject, foundWindowsFirmware bool
 	for _, call := range runner.calls {
 		script := call.Args[len(call.Args)-1]
 		if strings.Contains(script, "New-VHD") && strings.Contains(script, "-Differencing") &&
@@ -603,6 +606,9 @@ func TestCreateVMUsesDifferencingDisk(t *testing.T) {
 		if strings.Contains(script, "Invoke-Command") && strings.Contains(script, "authorized_keys") {
 			foundInject = true
 		}
+		if strings.Contains(script, "Set-VMFirmware") && strings.Contains(script, "MicrosoftWindows") {
+			foundWindowsFirmware = true
+		}
 	}
 	if !foundDiff {
 		t.Error("createVM should back the lease with a differencing disk over the template")
@@ -612,6 +618,9 @@ func TestCreateVMUsesDifferencingDisk(t *testing.T) {
 	}
 	if !foundStart {
 		t.Error("createVM did not start the VM")
+	}
+	if !foundWindowsFirmware {
+		t.Error("createVM did not preserve the Windows secure boot template")
 	}
 	if foundConnect || foundInject {
 		t.Error("createVM must leave the VM disconnected and defer guest SSH configuration to Acquire")
@@ -1110,14 +1119,17 @@ func TestAcquireDispatchesWindowsTarget(t *testing.T) {
 	}
 }
 
-func TestAcquireRejectsLinuxTarget(t *testing.T) {
+func TestAcquireDispatchesLinuxTarget(t *testing.T) {
 	b := testBackend(&recordingRunner{})
 	b.cfg.TargetOS = core.TargetLinux
-	b.cfg.HyperV.Image = `C:\Images\win-server.iso`
+	b.cfg.HyperV.Image = `C:\Images\debian.qcow2`
+	oldOS := hypervHostOS
+	hypervHostOS = "windows"
+	t.Cleanup(func() { hypervHostOS = oldOS })
 
 	_, err := b.Acquire(context.Background(), core.AcquireRequest{})
-	if err == nil || !strings.Contains(err.Error(), "supports target=windows only") {
-		t.Fatalf("Acquire should reject linux before Windows acquisition, got: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "generalized cloud VHDX") {
+		t.Fatalf("Acquire should dispatch Linux image validation, got: %v", err)
 	}
 }
 
@@ -1253,18 +1265,23 @@ func TestCleanupMissingClaimRemovesDeterministicStorage(t *testing.T) {
 		t.Fatalf("persistLease: %v", err)
 	}
 	baseVHD := filepath.Join(hypervVHDDir(), name+".vhdx")
+	seedVHD := cloudInitSeedPath(name)
 	if err := os.MkdirAll(filepath.Dir(baseVHD), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(baseVHD, []byte("disk"), 0o644); err != nil {
-		t.Fatal(err)
+	for _, path := range []string{baseVHD, seedVHD} {
+		if err := os.WriteFile(path, []byte("disk"), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatalf("Cleanup: %v", err)
 	}
-	if _, err := os.Stat(baseVHD); !os.IsNotExist(err) {
-		t.Fatalf("cleanup left deterministic disk %s: %v", baseVHD, err)
+	for _, path := range []string{baseVHD, seedVHD} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("cleanup left deterministic disk %s: %v", path, err)
+		}
 	}
 	if claims, err := listLeaseClaims(); err != nil || len(claims) != 0 {
 		t.Fatalf("claims after cleanup=%#v err=%v", claims, err)
@@ -1821,8 +1838,8 @@ func TestApplyFlagsDefersTargetValidation(t *testing.T) {
 	if cfg.TargetOS != core.TargetLinux {
 		t.Fatalf("applyFlags rewrote explicit target to %s", cfg.TargetOS)
 	}
-	if _, err := (Provider{}).Configure(cfg, core.Runtime{}); err == nil {
-		t.Fatal("central provider configuration should reject target=linux")
+	if _, err := (Provider{}).Configure(cfg, core.Runtime{}); err != nil {
+		t.Fatalf("central provider configuration should accept target=linux: %v", err)
 	}
 }
 
