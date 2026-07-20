@@ -153,6 +153,21 @@ retries within a bounded boot budget; later guest operations retry transient
 failures with backoff and bound each individual host PowerShell process so a
 wedged call cannot hang the lease indefinitely.
 
+## Pause and resume
+
+`crabbox pause --provider hyperv <lease>` uses Hyper-V saved state so the VM
+releases host CPU and memory while preserving guest state. A running VM is
+saved with `Save-VM`; a Hyper-V `Paused` VM is also converted to saved state
+because Hyper-V pause alone retains the VM's assigned memory. Pausing an
+already saved lease is a no-op.
+
+`crabbox resume --provider hyperv <lease>` starts a saved VM with `Start-VM`.
+For a VM left in Hyper-V's native `Paused` state, Crabbox uses `Resume-VM`.
+After either transition, Crabbox waits for DHCP and SSH readiness, then
+atomically refreshes the local lease claim with the current IP address. Pause
+and resume require an exact local claim for the VM; stopped or missing VMs are
+reported as errors.
+
 Set `CRABBOX_HYPERV_GUEST_PASSWORD` or `hyperv.guestPassword` in trusted user
 config to match the administrator password in your VHDX template. The provider
 requires an explicit value and disables SSH password authentication after key
