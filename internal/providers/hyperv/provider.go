@@ -21,10 +21,18 @@ func (Provider) Spec() core.ProviderSpec {
 		Name:        providerName,
 		Family:      "local-vm",
 		Kind:        core.ProviderKindSSHLease,
-		Targets:     []core.TargetSpec{{OS: core.TargetWindows, WindowsMode: core.WindowsModeNormal}},
-		Features:    core.FeatureSet{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureCleanup},
+		Targets:     providerTargets(),
+		Features:    providerFeatures(),
 		Coordinator: core.CoordinatorNever,
 	}
+}
+
+func providerTargets() []core.TargetSpec {
+	return []core.TargetSpec{{OS: core.TargetWindows, WindowsMode: core.WindowsModeNormal}}
+}
+
+func providerFeatures() core.FeatureSet {
+	return core.FeatureSet{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureCleanup}
 }
 
 func (Provider) RegisterFlags(fs *flag.FlagSet, defaults core.Config) any {
