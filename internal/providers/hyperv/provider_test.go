@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -70,6 +71,7 @@ func commandKey(args []string) string {
 func testBackend(runner *recordingRunner) *backend {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetWindows
 	cfg.HyperV = core.HyperVConfig{
 		Image:         `C:\Images\windows.vhdx`,
 		User:          "crabbox",
@@ -87,20 +89,19 @@ func TestProviderSpecAndAliases(t *testing.T) {
 	if p.Name() != providerName {
 		t.Fatalf("Name=%q want %s", p.Name(), providerName)
 	}
-	spec := p.Spec()
-	if spec.Kind != core.ProviderKindSSHLease || spec.Family != "local-vm" {
-		t.Fatalf("unexpected spec: %#v", spec)
+	want := core.ProviderSpec{
+		Name:        providerName,
+		Family:      "local-vm",
+		Kind:        core.ProviderKindSSHLease,
+		Targets:     []core.TargetSpec{{OS: core.TargetWindows, WindowsMode: core.WindowsModeNormal}},
+		Features:    core.FeatureSet{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureCleanup},
+		Coordinator: core.CoordinatorNever,
 	}
-	if spec.Coordinator != core.CoordinatorNever {
-		t.Fatalf("coordinator=%s want never", spec.Coordinator)
+	if spec := p.Spec(); !reflect.DeepEqual(spec, want) {
+		t.Fatalf("Spec()=%#v want %#v", spec, want)
 	}
-	for _, feature := range []core.Feature{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureCleanup} {
-		if !spec.Features.Has(feature) {
-			t.Fatalf("features=%v missing %s", spec.Features, feature)
-		}
-	}
-	if len(spec.Targets) != 1 || spec.Targets[0].OS != core.TargetWindows || spec.Targets[0].WindowsMode != core.WindowsModeNormal {
-		t.Fatalf("unexpected targets: %#v", spec.Targets)
+	if aliases := p.Aliases(); aliases != nil {
+		t.Fatalf("Aliases()=%v want nil", aliases)
 	}
 }
 
@@ -1070,7 +1071,7 @@ func TestResolveStatusOnlyAllowsRetainedLeaseWithoutIP(t *testing.T) {
 	}
 }
 
-func TestAcquireRejectsISO(t *testing.T) {
+func TestAcquireDispatchesWindowsTarget(t *testing.T) {
 	b := testBackend(&recordingRunner{})
 	oldOS := hypervHostOS
 	hypervHostOS = "windows"
@@ -1080,6 +1081,17 @@ func TestAcquireRejectsISO(t *testing.T) {
 	_, err := b.Acquire(context.Background(), core.AcquireRequest{})
 	if err == nil || !strings.Contains(err.Error(), "does not support ISO") {
 		t.Fatalf("Acquire should reject ISO images, got: %v", err)
+	}
+}
+
+func TestAcquireRejectsLinuxTarget(t *testing.T) {
+	b := testBackend(&recordingRunner{})
+	b.cfg.TargetOS = core.TargetLinux
+	b.cfg.HyperV.Image = `C:\Images\win-server.iso`
+
+	_, err := b.Acquire(context.Background(), core.AcquireRequest{})
+	if err == nil || !strings.Contains(err.Error(), "supports target=windows only") {
+		t.Fatalf("Acquire should reject linux before Windows acquisition, got: %v", err)
 	}
 }
 

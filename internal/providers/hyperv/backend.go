@@ -111,6 +111,15 @@ func (b *backend) configForRun() Config {
 }
 
 func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget, error) {
+	switch b.configForRun().TargetOS {
+	case targetWindows:
+		return b.acquireWindows(ctx, req)
+	default:
+		return LeaseTarget{}, exit(2, "provider=%s supports target=windows only", providerName)
+	}
+}
+
+func (b *backend) acquireWindows(ctx context.Context, req AcquireRequest) (LeaseTarget, error) {
 	if hypervHostOS != "windows" {
 		return LeaseTarget{}, exit(2, "provider=%s requires a Windows host with Hyper-V enabled", providerName)
 	}
