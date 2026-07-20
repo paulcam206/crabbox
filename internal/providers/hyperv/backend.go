@@ -29,6 +29,10 @@ type backend struct {
 	guestReadyBudget       time.Duration
 	guestInvokeTimeout     time.Duration
 	guestRetryBackoff      time.Duration
+	sshReady               func(context.Context, *SSHTarget, string, time.Duration) error
+	resumeSSHProbeTimeout  time.Duration
+	resumeIPStableWindow   time.Duration
+	resumePollInterval     time.Duration
 }
 
 var hypervHostOS = runtime.GOOS
@@ -57,6 +61,12 @@ func newBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
 		guestReadyBudget:       5 * time.Minute,
 		guestInvokeTimeout:     10 * time.Minute,
 		guestRetryBackoff:      3 * time.Second,
+		resumeSSHProbeTimeout:  10 * time.Second,
+		resumeIPStableWindow:   5 * time.Second,
+		resumePollInterval:     time.Second,
+		sshReady: func(ctx context.Context, target *SSHTarget, phase string, timeout time.Duration) error {
+			return waitForSSHReady(ctx, target, rt.Stderr, phase, timeout)
+		},
 	}
 }
 
@@ -990,7 +1000,7 @@ func (b *backend) prepareLease(ctx context.Context, cfg Config, inst hypervVM, i
 	target.Port = sshPort
 	target.FallbackPorts = []string{}
 	if wait {
-		if err := waitForSSHReady(ctx, &target, b.rt.Stderr, "hyperv ssh", bootstrapWaitTimeout(cfg)); err != nil {
+		if err := b.sshReady(ctx, &target, "hyperv ssh", bootstrapWaitTimeout(cfg)); err != nil {
 			return LeaseTarget{}, err
 		}
 		server.Status = "ready"
@@ -1230,7 +1240,9 @@ func (b *backend) serverFromInstance(inst hypervVM, claim core.LeaseClaim, cfg C
 	if labels["slug"] == "" {
 		labels["slug"] = claim.Slug
 	}
-	liveState := hypervState(inst.State)
+	rawState := hypervState(inst.State)
+	liveState := hypervLeaseState(inst.State)
+	labels["hyperv_state"] = rawState
 	if inst.State != 2 || labels["state"] == "" {
 		labels["state"] = liveState
 	}
@@ -1351,7 +1363,7 @@ func shouldCleanup(server Server, claim core.LeaseClaim, hasClaim bool, now time
 	if !hasClaim {
 		return false, "missing claim"
 	}
-	if server.Status != "running" && server.Status != "ready" {
+	if server.Status != "running" && server.Status != "ready" && server.Status != "paused" && server.Status != "saved" {
 		return true, "instance state=" + blank(server.Status, "unknown")
 	}
 	expiresAt := strings.TrimSpace(server.Labels["expires_at"])
@@ -1378,12 +1390,16 @@ func shouldCleanup(server Server, claim core.LeaseClaim, hasClaim bool, now time
 }
 
 func requireExactHyperVClaim(leaseID, instanceName string) error {
+	return requireExactHyperVClaimFor(leaseID, instanceName, "stop")
+}
+
+func requireExactHyperVClaimFor(leaseID, instanceName, action string) error {
 	owned, err := exactHyperVClaimOwned(leaseID, instanceName)
 	if err != nil {
 		return err
 	}
 	if !owned {
-		return exit(4, "hyperv lease %q has no exact local claim bound to VM %q; adopt it with an explicit --reclaim reuse before stop", strings.TrimSpace(leaseID), strings.TrimSpace(instanceName))
+		return exit(4, "hyperv lease %q has no exact local claim bound to VM %q; adopt it with an explicit --reclaim reuse before %s", strings.TrimSpace(leaseID), strings.TrimSpace(instanceName), action)
 	}
 	return nil
 }

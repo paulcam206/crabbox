@@ -89,7 +89,7 @@ func TestProviderSpecAndAliases(t *testing.T) {
 		Family:      "local-vm",
 		Kind:        core.ProviderKindSSHLease,
 		Targets:     []core.TargetSpec{{OS: core.TargetWindows, WindowsMode: core.WindowsModeNormal}},
-		Features:    core.FeatureSet{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureCleanup},
+		Features:    core.FeatureSet{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureCleanup, core.FeaturePauseResume},
 		Coordinator: core.CoordinatorNever,
 	}
 	if spec := p.Spec(); !reflect.DeepEqual(spec, want) {
@@ -375,6 +375,20 @@ func TestHypervState(t *testing.T) {
 	}
 }
 
+func TestHypervLeaseStateNormalizesSavedAndPaused(t *testing.T) {
+	tests := map[int]string{
+		2: "running",
+		3: "stopped",
+		6: "paused",
+		9: "paused",
+	}
+	for state, want := range tests {
+		if got := hypervLeaseState(state); got != want {
+			t.Fatalf("hypervLeaseState(%d)=%q want %q", state, got, want)
+		}
+	}
+}
+
 func TestInstanceScopeRoundTrip(t *testing.T) {
 	name := "crabbox-blue-1234abcd"
 	if got := instanceNameFromScope(instanceScope(name)); got != name {
@@ -528,6 +542,18 @@ func TestServerFromInstanceOverridesStaleReadyState(t *testing.T) {
 	)
 	if server.Status != "stopped" || server.Labels["state"] != "stopped" {
 		t.Fatalf("status=%q state=%q, want stopped", server.Status, server.Labels["state"])
+	}
+}
+
+func TestServerFromInstanceNormalizesSavedStateAndRetainsRawState(t *testing.T) {
+	b := testBackend(&recordingRunner{})
+	server := b.serverFromInstance(
+		hypervVM{Name: "crabbox-blue-1234", State: hypervStateSaved},
+		core.LeaseClaim{Labels: map[string]string{"state": "ready"}},
+		b.configForRun(),
+	)
+	if server.Status != "paused" || server.Labels["state"] != "paused" || server.Labels["hyperv_state"] != "saved" {
+		t.Fatalf("status=%q state=%q hyperv_state=%q", server.Status, server.Labels["state"], server.Labels["hyperv_state"])
 	}
 }
 
