@@ -138,6 +138,52 @@ func TestCreateLinuxVMConnectsNetworkBeforeBootWithoutPowerShellDirect(t *testin
 	}
 }
 
+func TestLinuxAcquireKeepPreservesNoCloudSeedWithoutTailscale(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, "state"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
+	oldOS := hypervHostOS
+	hypervHostOS = "windows"
+	t.Cleanup(func() { hypervHostOS = oldOS })
+
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	runner.respond = func(req core.LocalCommandRequest) (core.LocalCommandResult, error, bool) {
+		script := commandScript(req)
+		switch {
+		case strings.Contains(script, "Get-VM | Where-Object"):
+			return core.LocalCommandResult{Stdout: "null"}, nil, true
+		case strings.Contains(script, "Get-VMNetworkAdapter"):
+			return core.LocalCommandResult{Stdout: `["192.0.2.25"]`}, nil, true
+		default:
+			return core.LocalCommandResult{}, nil, false
+		}
+	}
+	b := testBackend(runner)
+	b.cfg.TargetOS = targetLinux
+	b.cfg.HyperV.Image = `C:\Images\debian-cloud.vhdx`
+	b.cfg.HyperV.GuestPassword = ""
+	b.sshReady = func(context.Context, *SSHTarget, io.Writer, string, time.Duration) error {
+		return fmt.Errorf("ssh unavailable")
+	}
+
+	_, err := b.Acquire(context.Background(), core.AcquireRequest{
+		Repo: core.Repo{Root: t.TempDir()},
+		Keep: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "ssh unavailable") {
+		t.Fatalf("Acquire err=%v", err)
+	}
+	calls := joinedCallScripts(runner.calls)
+	if strings.Contains(calls, "Get-VMHardDiskDrive -VMName") {
+		t.Fatalf("kept non-Tailscale lease detached its NoCloud seed: %s", calls)
+	}
+	if strings.Contains(calls, "Remove-VM -Name") {
+		t.Fatalf("kept non-Tailscale lease removed its VM: %s", calls)
+	}
+}
+
 func TestLinuxAcquireResolveReleaseLifecycle(t *testing.T) {
 	stateDir := t.TempDir()
 	configDir := t.TempDir()
