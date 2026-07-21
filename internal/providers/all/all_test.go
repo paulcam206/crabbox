@@ -665,7 +665,6 @@ func TestProviderKindFeatureContracts(t *testing.T) {
 			core.FeatureRunSession,
 			core.FeatureRunArtifacts,
 			core.FeatureRunDownloads,
-			core.FeaturePauseResume,
 			core.FeatureMCP,
 		} {
 			if spec.Features.Has(feature) && spec.Kind != core.ProviderKindDelegatedRun {

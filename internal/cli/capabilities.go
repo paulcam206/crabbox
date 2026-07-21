@@ -42,16 +42,17 @@ func validateRequestedCapabilities(cfg Config) error {
 		return err
 	}
 	spec := provider.Spec()
-	if cfg.Desktop && !featureSetHas(spec.Features, FeatureDesktop) {
+	features := spec.FeaturesForTarget(cfg.TargetOS, cfg.WindowsMode)
+	if cfg.Desktop && !featureSetHas(features, FeatureDesktop) {
 		return exit(2, "desktop/VNC is not supported for provider=%s", provider.Name())
 	}
 	if err := validateDesktopEnv(cfg); err != nil {
 		return err
 	}
-	if cfg.Browser && !featureSetHas(spec.Features, FeatureBrowser) {
+	if cfg.Browser && !featureSetHas(features, FeatureBrowser) {
 		return exit(2, "browser provisioning is not supported for provider=%s", provider.Name())
 	}
-	if cfg.Code && !featureSetHas(spec.Features, FeatureCode) {
+	if cfg.Code && !featureSetHas(features, FeatureCode) {
 		return exit(2, "web code is not supported for provider=%s", provider.Name())
 	}
 	if cfg.TargetOS == targetWindows && cfg.WindowsMode == windowsModeWSL2 && cfg.Desktop {

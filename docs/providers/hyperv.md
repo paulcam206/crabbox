@@ -10,7 +10,16 @@ Family: `local-vm`
 The Hyper-V provider creates and manages Linux or Windows virtual machines on a
 local Windows host using Microsoft Hyper-V. VMs are provisioned as Generation 2
 VMs from a target-appropriate VHDX template, connected to a configurable virtual
-switch (default: "Default Switch"), and accessed over SSH.
+switch (default: "Default Switch"), and accessed over SSH. Windows normal mode
+is the default target when `--target` is omitted.
+
+| Capability | Linux | Windows normal |
+| --- | --- | --- |
+| SSH, Crabbox sync, cleanup | Yes | Yes |
+| Pause and resume | Yes | Yes |
+| Desktop and browser | Yes, through cloud-init | Yes, through PowerShell Direct |
+| Workspace checkpoint, fork, restore, provider snapshot | No | Yes |
+| Code, Tailscale, cache volume | No | No |
 
 Hyper-V must be enabled on the host (`Enable-WindowsOptionalFeature -Online
 -FeatureName Microsoft-Hyper-V-All`). The provider is Windows-only and will
@@ -199,8 +208,6 @@ During Linux `Acquire`, the provider:
 6. Detaches and deletes the seed VHDX after readiness.
 
 Linux guest commands are never run through PowerShell Direct.
-Desktop and browser provisioning are currently supported only for Linux
-targets; Windows requests for those features are rejected.
 
 ### Windows
 
@@ -235,6 +242,14 @@ PowerShell Direct using the guest administrator password. The readiness probe
 retries within a bounded boot budget; later guest operations retry transient
 failures with backoff and bound each individual host PowerShell process so a
 wedged call cannot hang the lease indefinitely.
+
+## Workspace checkpoints
+
+Workspace checkpoint, fork, restore, and provider snapshot capabilities are
+available for Windows normal leases only. They use Hyper-V production
+checkpoints and exported VM artifacts. Linux checkpoint specialization is not
+implemented yet, so Linux targets do not advertise these capabilities and the
+native checkpoint capability probe rejects them.
 
 ## Pause and resume
 
