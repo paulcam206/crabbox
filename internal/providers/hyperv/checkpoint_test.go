@@ -32,13 +32,32 @@ func TestNativeCheckpointCapabilityPrefersProductionCheckpointForAuto(t *testing
 	}
 }
 
-func TestNativeCheckpointCapabilityRejectsLinux(t *testing.T) {
-	if capability, ok := (Provider{}).NativeCheckpointCapability(core.NativeCheckpointRequest{
+func TestNativeCheckpointCapabilitySupportsLinuxProductionCheckpoints(t *testing.T) {
+	capability, ok := (Provider{}).NativeCheckpointCapability(core.NativeCheckpointRequest{
 		Config:   core.Config{Provider: providerName, TargetOS: core.TargetLinux},
 		Target:   core.SSHTarget{TargetOS: core.TargetLinux},
 		Strategy: "auto",
-	}); ok {
-		t.Fatalf("Linux checkpoint capability=%#v want unsupported", capability)
+	})
+	if !ok || capability.Kind != hypervCheckpointKind || !capability.Direct || !capability.PreferredForAuto {
+		t.Fatalf("Linux checkpoint capability=%#v ok=%v", capability, ok)
+	}
+}
+
+func TestApplyNativeCheckpointForkConfigUsesRecordedLinuxTarget(t *testing.T) {
+	paths, metadata := createCheckpointArtifact(t)
+	configureLinuxCheckpointMetadata(metadata)
+	cfg := core.BaseConfig()
+	cfg.TargetOS = core.TargetWindows
+	cfg.WindowsMode = core.WindowsModeNormal
+
+	if err := (Provider{}).ApplyNativeCheckpointForkConfig(core.NativeCheckpointForkRequest{
+		Config: &cfg,
+		Record: checkpointForkRecord(paths, metadata),
+	}); err != nil {
+		t.Fatalf("ApplyNativeCheckpointForkConfig: %v", err)
+	}
+	if cfg.TargetOS != core.TargetLinux || cfg.WindowsMode != "" || cfg.WorkRoot != "/work/crabbox" {
+		t.Fatalf("Linux fork config=%#v", cfg)
 	}
 }
 
@@ -111,6 +130,127 @@ func TestCreateNativeCheckpointExportsProductionMetadata(t *testing.T) {
 		if !strings.Contains(createScript, expected) {
 			t.Fatalf("create script missing %q: %s", expected, createScript)
 		}
+	}
+}
+
+func TestCreateNativeCheckpointLinuxVerifiesProductionSupport(t *testing.T) {
+	setCheckpointTestState(t)
+	artifactDir := t.TempDir()
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	runner.respond = func(req core.LocalCommandRequest) (core.LocalCommandResult, error, bool) {
+		script := commandScript(req)
+		switch {
+		case strings.Contains(script, "Get-VMIntegrationService"):
+			return jsonResult(t, linuxProductionCheckpointSupport{
+				Found:   true,
+				Enabled: true,
+				Primary: "OK",
+			}), nil, true
+		case strings.Contains(script, "Get-VMFirmware"):
+			return jsonResult(t, firmwareOutput{
+				Enabled:  true,
+				Template: secureBootTemplateLinux,
+			}), nil, true
+		case strings.Contains(script, "Select-Object Name,@{Name='ID'"):
+			return jsonResult(t, checkpointVM{Name: testCheckpointVMName, ID: testCheckpointVMID, State: 2}), nil, true
+		case strings.Contains(script, "Export-VMSnapshot"):
+			configPath := filepath.Join(artifactDir, "hyperv", "exported", "Virtual Machines", "checkpoint.vmcx")
+			if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(configPath, []byte("vmcx"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return jsonResult(t, checkpointCreateOutput{
+				SourceVMID:     testCheckpointVMID,
+				SnapshotID:     testCheckpointSnapshot,
+				SnapshotName:   checkpointNameFromScript(script),
+				ExportedConfig: configPath,
+			}), nil, true
+		default:
+			return core.LocalCommandResult{}, nil, false
+		}
+	}
+	b := testBackend(runner)
+	configureLinuxCheckpointBackend(b)
+	persistCheckpointSource(t, b)
+	oldOS := hypervHostOS
+	hypervHostOS = "windows"
+	t.Cleanup(func() { hypervHostOS = oldOS })
+
+	result, err := (Provider{}).CreateNativeCheckpoint(context.Background(), core.NativeCheckpointCreateRequest{
+		Config:      b.cfg,
+		Runtime:     core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner},
+		Server:      checkpointSourceServer(b),
+		Target:      core.SSHTarget{TargetOS: core.TargetLinux},
+		LeaseID:     testCheckpointLeaseID,
+		Name:        "linux-ready",
+		RepoName:    "my-app",
+		ArtifactDir: artifactDir,
+		Strategy:    "disk-snapshot",
+	})
+	if err != nil {
+		t.Fatalf("CreateNativeCheckpoint Linux: %v", err)
+	}
+	if result.Metadata[checkpointMetadataTarget] != core.TargetLinux ||
+		result.Metadata[checkpointMetadataSpecialization] != linuxForkSpecializationVersion ||
+		result.Metadata[checkpointMetadataSecureBoot] != "true" ||
+		result.Metadata[checkpointMetadataSecureTemplate] != secureBootTemplateLinux {
+		t.Fatalf("Linux metadata=%#v", result.Metadata)
+	}
+	supportIndex := findCallIndex(runner.calls, "Get-VMIntegrationService")
+	exportIndex := findCallIndex(runner.calls, "Export-VMSnapshot")
+	if supportIndex < 0 || exportIndex <= supportIndex {
+		t.Fatalf("production support was not verified before export: support=%d export=%d", supportIndex, exportIndex)
+	}
+	supportScript := commandScript(runner.calls[supportIndex])
+	for _, expected := range []string{"-Name 'VSS'", "PrimaryStatusDescription", "SecondaryOperationalStatus"} {
+		if !strings.Contains(supportScript, expected) {
+			t.Fatalf("support script missing %q: %s", expected, supportScript)
+		}
+	}
+}
+
+func TestCreateNativeCheckpointLinuxFailsClearlyWithoutProductionSupport(t *testing.T) {
+	setCheckpointTestState(t)
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	runner.respond = func(req core.LocalCommandRequest) (core.LocalCommandResult, error, bool) {
+		script := commandScript(req)
+		switch {
+		case strings.Contains(script, "Get-VMIntegrationService"):
+			return jsonResult(t, linuxProductionCheckpointSupport{
+				Found:     true,
+				Enabled:   true,
+				Primary:   "No Contact",
+				Secondary: "ProtocolMismatch",
+			}), nil, true
+		case strings.Contains(script, "Select-Object Name,@{Name='ID'"):
+			return jsonResult(t, checkpointVM{Name: testCheckpointVMName, ID: testCheckpointVMID, State: 2}), nil, true
+		default:
+			return core.LocalCommandResult{}, nil, false
+		}
+	}
+	b := testBackend(runner)
+	configureLinuxCheckpointBackend(b)
+	persistCheckpointSource(t, b)
+	oldOS := hypervHostOS
+	hypervHostOS = "windows"
+	t.Cleanup(func() { hypervHostOS = oldOS })
+
+	_, err := (Provider{}).CreateNativeCheckpoint(context.Background(), core.NativeCheckpointCreateRequest{
+		Config:      b.cfg,
+		Runtime:     core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner},
+		Server:      checkpointSourceServer(b),
+		Target:      core.SSHTarget{TargetOS: core.TargetLinux},
+		LeaseID:     testCheckpointLeaseID,
+		ArtifactDir: t.TempDir(),
+		Strategy:    "disk-snapshot",
+	})
+	if err == nil || !strings.Contains(err.Error(), "hv_vss_daemon") || !strings.Contains(err.Error(), "fallback is disabled") {
+		t.Fatalf("Linux production support error=%v", err)
+	}
+	if findCallIndex(runner.calls, "Checkpoint-VM") >= 0 {
+		t.Fatal("checkpoint creation ran after Linux production support failed")
 	}
 }
 
@@ -258,6 +398,59 @@ func TestRestoreNativeCheckpointRefreshesClaimEndpoint(t *testing.T) {
 	}
 	if claim.SSHHost != "192.0.2.45" {
 		t.Fatalf("claim SSH host=%q", claim.SSHHost)
+	}
+}
+
+func TestRestoreNativeCheckpointLinuxPreservesIdentityAndRefreshesEndpoint(t *testing.T) {
+	setCheckpointTestState(t)
+	paths, metadata := createCheckpointArtifact(t)
+	configureLinuxCheckpointMetadata(metadata)
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	runner.respond = func(req core.LocalCommandRequest) (core.LocalCommandResult, error, bool) {
+		script := commandScript(req)
+		switch {
+		case strings.Contains(script, "Select-Object Name,@{Name='ID'"):
+			return jsonResult(t, checkpointVM{Name: testCheckpointVMName, ID: testCheckpointVMID, State: 3}), nil, true
+		case strings.Contains(script, "Restore-VMSnapshot"):
+			return core.LocalCommandResult{}, nil, true
+		case strings.Contains(script, "Select-Object -ExpandProperty IPAddresses"):
+			return core.LocalCommandResult{Stdout: `["192.0.2.46"]`}, nil, true
+		default:
+			return core.LocalCommandResult{}, nil, false
+		}
+	}
+	b := testBackend(runner)
+	configureLinuxCheckpointBackend(b)
+	b.sshReady = func(_ context.Context, target *SSHTarget, _ io.Writer, _ string, _ time.Duration) error {
+		if target.TargetOS != core.TargetLinux {
+			t.Fatalf("restored target OS=%q", target.TargetOS)
+		}
+		return nil
+	}
+	persistCheckpointSource(t, b)
+
+	lease, err := b.restoreNativeCheckpoint(context.Background(), core.NativeCheckpointRestoreRequest{
+		Config:  b.cfg,
+		Record:  checkpointForkRecord(paths, metadata),
+		LeaseID: testCheckpointLeaseID,
+		Repo:    core.Repo{Root: t.TempDir()},
+		Reclaim: true,
+	})
+	if err != nil {
+		t.Fatalf("restoreNativeCheckpoint Linux: %v", err)
+	}
+	if lease.Server.CloudID != testCheckpointVMName || lease.SSH.Host != "192.0.2.46" || lease.SSH.TargetOS != core.TargetLinux {
+		t.Fatalf("restored Linux lease=%#v", lease)
+	}
+	claim, ok, err := core.ResolveLeaseClaimForProvider(testCheckpointLeaseID, providerName)
+	if err != nil || !ok {
+		t.Fatalf("resolve refreshed Linux claim: ok=%v err=%v", ok, err)
+	}
+	if claim.ProviderScope != instanceScope(testCheckpointVMName) || claim.SSHHost != "192.0.2.46" {
+		t.Fatalf("refreshed Linux claim=%#v", claim)
+	}
+	if findCallIndex(runner.calls, "Invoke-Command -VMName") >= 0 {
+		t.Fatal("Linux restore used PowerShell Direct")
 	}
 }
 
@@ -463,6 +656,154 @@ func TestForkNativeCheckpointCreatesFreshIdentityAndConnectsNetworkLast(t *testi
 	}
 }
 
+func TestForkNativeCheckpointLinuxSpecializesDisconnectedBeforeNetwork(t *testing.T) {
+	setCheckpointTestState(t)
+	paths, metadata := createCheckpointArtifact(t)
+	configureLinuxCheckpointMetadata(metadata)
+	var capturedUserData, capturedMetaData, seedPath string
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{},
+		onRun: func(req core.LocalCommandRequest) {
+			script := commandScript(req)
+			if !strings.Contains(script, "NewFileSystemLabel 'cidata'") {
+				return
+			}
+			capturedUserData = readRequestEnvFile(t, req, "_CRABBOX_USER_DATA_PATH")
+			capturedMetaData = readRequestEnvFile(t, req, "_CRABBOX_META_DATA_PATH")
+			seedPath = powerShellSeedPath(t, script)
+			if err := os.MkdirAll(filepath.Dir(seedPath), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(seedPath, []byte("seed"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		},
+	}
+	runner.respond = func(req core.LocalCommandRequest) (core.LocalCommandResult, error, bool) {
+		script := commandScript(req)
+		switch {
+		case strings.Contains(script, "Import-VM"):
+			return jsonResult(t, checkpointImportOutput{ID: "99999999-8888-7777-6666-555555555555"}), nil, true
+		case strings.Contains(script, "Select-Object Name,@{Name='ID'"):
+			return jsonResult(t, checkpointVM{Name: "fork", ID: "99999999-8888-7777-6666-555555555555", State: 3}), nil, true
+		case strings.Contains(script, "Select-Object -ExpandProperty IPAddresses"):
+			return core.LocalCommandResult{Stdout: `["192.0.2.56"]`}, nil, true
+		default:
+			return core.LocalCommandResult{}, nil, false
+		}
+	}
+	b := testBackend(runner)
+	configureLinuxCheckpointBackend(b)
+	b.ensureLeaseKey = func(Config, string) (string, string, error) {
+		keyPath := filepath.Join(t.TempDir(), "id_ed25519")
+		if err := os.WriteFile(keyPath, []byte("private"), 0o600); err != nil {
+			return "", "", err
+		}
+		return keyPath, "ssh-ed25519 AAAATEST fork@test", nil
+	}
+	b.sshReady = func(context.Context, *SSHTarget, io.Writer, string, time.Duration) error { return nil }
+	oldOS := hypervHostOS
+	hypervHostOS = "windows"
+	t.Cleanup(func() { hypervHostOS = oldOS })
+
+	lease, err := b.ForkNativeCheckpoint(context.Background(), core.NativeCheckpointForkLifecycleRequest{
+		Record:        checkpointForkRecord(paths, metadata),
+		Repo:          core.Repo{Root: t.TempDir(), Name: "my-app"},
+		Keep:          true,
+		RequestedSlug: "linux-checkpoint-fork",
+	})
+	if err != nil {
+		t.Fatalf("ForkNativeCheckpoint Linux: %v", err)
+	}
+	if lease.LeaseID == "" || lease.LeaseID == testCheckpointLeaseID || lease.SSH.Host != "192.0.2.56" || lease.SSH.TargetOS != core.TargetLinux {
+		t.Fatalf("forked Linux lease=%#v", lease)
+	}
+	importScript := findScript(runner.calls, "Import-VM")
+	if !strings.Contains(importScript, "Disconnect-VMNetworkAdapter") || strings.Contains(importScript, "Start-VM -VM $vm") {
+		t.Fatalf("Linux import was not disconnected and stopped: %s", importScript)
+	}
+	startIndices := findCallIndices(runner.calls, "Start-VM")
+	importIndex := findCallIndex(runner.calls, "Import-VM")
+	seedCreateIndex := findCallIndex(runner.calls, "NewFileSystemLabel 'cidata'")
+	attachIndex := findCallIndex(runner.calls, "Add-VMHardDiskDrive")
+	firmwareIndex := findCallIndex(runner.calls, "Set-VMFirmware")
+	offIndex := findCallIndex(runner.calls, "Select-Object Name,@{Name='ID'")
+	detachIndex := findCallIndex(runner.calls, "Remove-VMHardDiskDrive")
+	verifyIndex := findCallIndex(runner.calls, "offline specialization completion marker")
+	connectIndex := findCallIndex(runner.calls, "Connect-VMNetworkAdapter")
+	ipIndex := findCallIndex(runner.calls, "Select-Object -ExpandProperty IPAddresses")
+	if len(startIndices) != 2 ||
+		!(importIndex < seedCreateIndex &&
+			seedCreateIndex < attachIndex &&
+			attachIndex < firmwareIndex &&
+			firmwareIndex < startIndices[0] &&
+			startIndices[0] < offIndex &&
+			offIndex < detachIndex &&
+			detachIndex < verifyIndex &&
+			verifyIndex < connectIndex &&
+			connectIndex < startIndices[1] &&
+			startIndices[1] < ipIndex) {
+		t.Fatalf(
+			"Linux specialization order import=%d seed=%d attach=%d firmware=%d starts=%v off=%d detach=%d verify=%d connect=%d ip=%d",
+			importIndex,
+			seedCreateIndex,
+			attachIndex,
+			firmwareIndex,
+			startIndices,
+			offIndex,
+			detachIndex,
+			verifyIndex,
+			connectIndex,
+			ipIndex,
+		)
+	}
+	if firmwareScript := commandScript(runner.calls[firmwareIndex]); !strings.Contains(firmwareScript, secureBootTemplateLinux) {
+		t.Fatalf("fork firmware did not preserve source template: %s", firmwareScript)
+	}
+	instanceID := linuxForkSpecializationInstanceID(lease.LeaseID)
+	hostname := forkGuestHostname(lease.LeaseID)
+	if !strings.Contains(capturedMetaData, "instance-id: "+instanceID) ||
+		!strings.Contains(capturedMetaData, "local-hostname: "+hostname) ||
+		strings.Contains(capturedMetaData, testCheckpointVMName) {
+		t.Fatalf("specialization meta-data=%q", capturedMetaData)
+	}
+	for _, expected := range []string{
+		"authorized_keys",
+		`gid="$(id -g crabbox)"`,
+		"rm -f /etc/ssh/ssh_host_*",
+		"ssh-keygen -A",
+		"hostnamectl set-hostname " + hostname,
+		"systemctl stop tailscaled.service",
+		"rm -rf /var/lib/tailscale",
+		"current_instance_dir=\"/var/lib/cloud/instances/" + instanceID + "\"",
+		"! -path \"$current_instance_dir\"",
+		linuxForkSpecializationMarker,
+		linuxForkSeedCompletionMarker,
+		"blkid -L cidata",
+		"systemctl poweroff",
+	} {
+		if !strings.Contains(capturedUserData, expected) {
+			t.Fatalf("specialization user-data missing %q: %s", expected, capturedUserData)
+		}
+	}
+	if seedPath == "" {
+		t.Fatal("specialization seed path was not captured")
+	}
+	if _, err := os.Stat(seedPath); !os.IsNotExist(err) {
+		t.Fatalf("specialization seed remains after network enable: %v", err)
+	}
+	claim, ok, err := core.ResolveLeaseClaimForProvider(lease.LeaseID, providerName)
+	if err != nil || !ok {
+		t.Fatalf("resolve forked Linux claim: ok=%v err=%v", ok, err)
+	}
+	if claim.SSHHost != "192.0.2.56" || claim.ProviderScope != instanceScope(lease.Server.CloudID) {
+		t.Fatalf("forked Linux claim=%#v", claim)
+	}
+	if findCallIndex(runner.calls, "Invoke-Command -VMName") >= 0 {
+		t.Fatal("Linux checkpoint fork used PowerShell Direct")
+	}
+}
+
 func TestRemoveImportedCheckpointVMFindsPartialRegistrationByStorage(t *testing.T) {
 	setCheckpointTestState(t)
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
@@ -657,15 +998,41 @@ func checkpointMetadata(artifactDir, exportRoot, config string) map[string]strin
 	}
 }
 
+func configureLinuxCheckpointBackend(b *backend) {
+	b.cfg.TargetOS = core.TargetLinux
+	b.cfg.WindowsMode = ""
+	b.cfg.HyperV.Image = `C:\Images\debian-cloud.vhdx`
+	b.cfg.HyperV.GuestPassword = ""
+	b.cfg.HyperV.WorkRoot = "/work/crabbox"
+	b.cfg.WorkRoot = "/work/crabbox"
+	b.cfg.SSHUser = b.cfg.HyperV.User
+}
+
+func configureLinuxCheckpointMetadata(metadata map[string]string) {
+	metadata[checkpointMetadataTarget] = core.TargetLinux
+	metadata[checkpointMetadataWorkRoot] = "/work/crabbox"
+	metadata[checkpointMetadataSpecialization] = linuxForkSpecializationVersion
+	metadata[checkpointMetadataSecureBoot] = "true"
+	metadata[checkpointMetadataSecureTemplate] = secureBootTemplateLinux
+}
+
 func checkpointForkRecord(paths checkpointArtifactPaths, metadata map[string]string) core.NativeCheckpointForkRecord {
+	target, err := checkpointTarget(metadata)
+	if err != nil {
+		panic(err)
+	}
+	windowsMode := ""
+	if target == core.TargetWindows {
+		windowsMode = core.WindowsModeNormal
+	}
 	return core.NativeCheckpointForkRecord{
 		Kind:        hypervCheckpointKind,
 		ImageID:     testCheckpointSnapshot,
 		Name:        metadata[checkpointMetadataSnapshotName],
 		Resource:    paths.config,
 		ArtifactDir: paths.artifactDir,
-		TargetOS:    core.TargetWindows,
-		WindowsMode: core.WindowsModeNormal,
+		TargetOS:    target,
+		WindowsMode: windowsMode,
 		Metadata:    metadata,
 	}
 }
@@ -692,6 +1059,41 @@ func findCallIndex(calls []core.LocalCommandRequest, needle string) int {
 		}
 	}
 	return -1
+}
+
+func findCallIndices(calls []core.LocalCommandRequest, needle string) []int {
+	var indices []int
+	for i, call := range calls {
+		if strings.Contains(commandScript(call), needle) {
+			indices = append(indices, i)
+		}
+	}
+	return indices
+}
+
+func readRequestEnvFile(t *testing.T, req core.LocalCommandRequest, name string) string {
+	t.Helper()
+	path := requestEnv(req, name)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", name, err)
+	}
+	return string(data)
+}
+
+func powerShellSeedPath(t *testing.T, script string) string {
+	t.Helper()
+	const marker = "$path = '"
+	start := strings.Index(script, marker)
+	if start < 0 {
+		t.Fatalf("seed script has no path assignment: %s", script)
+	}
+	start += len(marker)
+	end := strings.Index(script[start:], "';")
+	if end < 0 {
+		t.Fatalf("seed script has no path terminator: %s", script)
+	}
+	return strings.ReplaceAll(script[start:start+end], "''", "'")
 }
 
 func jsonResult(t *testing.T, value any) core.LocalCommandResult {

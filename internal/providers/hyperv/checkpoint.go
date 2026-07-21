@@ -36,6 +36,9 @@ const (
 	checkpointMetadataSSHUser        = "ssh_user"
 	checkpointMetadataWorkRoot       = "work_root"
 	checkpointMetadataSwitch         = "switch"
+	checkpointMetadataSpecialization = "linux_fork_specialization"
+	checkpointMetadataSecureBoot     = "secure_boot_enabled"
+	checkpointMetadataSecureTemplate = "secure_boot_template"
 )
 
 var (
@@ -69,7 +72,7 @@ type checkpointImportOutput struct {
 
 func (Provider) NativeCheckpointCapability(req core.NativeCheckpointRequest) (core.NativeCheckpointCapability, bool) {
 	target := firstNonBlank(req.Target.TargetOS, req.Config.TargetOS)
-	if target != "" && target != core.TargetWindows {
+	if target != "" && target != core.TargetWindows && target != core.TargetLinux {
 		return core.NativeCheckpointCapability{}, false
 	}
 	switch strings.TrimSpace(req.Strategy) {
@@ -165,8 +168,16 @@ func (Provider) ApplyNativeCheckpointForkConfig(req core.NativeCheckpointForkReq
 		return err
 	}
 	req.Config.Provider = providerName
-	req.Config.TargetOS = core.TargetWindows
-	req.Config.WindowsMode = core.WindowsModeNormal
+	target, err := checkpointTarget(req.Record.Metadata)
+	if err != nil {
+		return err
+	}
+	req.Config.TargetOS = target
+	if target == core.TargetWindows {
+		req.Config.WindowsMode = core.WindowsModeNormal
+	} else {
+		req.Config.WindowsMode = ""
+	}
 	if value := strings.TrimSpace(req.Record.Metadata[checkpointMetadataSSHUser]); value != "" {
 		req.Config.HyperV.User = value
 		req.Config.SSHUser = value
@@ -316,6 +327,23 @@ func (b *backend) createNativeCheckpoint(ctx context.Context, req core.NativeChe
 	if source.State == hypervMissingState || source.ID == "" {
 		return result, exit(4, "Hyper-V checkpoint source VM %s no longer exists", sourceName)
 	}
+	var sourceFirmware firmwareSettings
+	target := firstNonBlank(req.Target.TargetOS, req.Config.TargetOS)
+	if target == "" {
+		target = core.TargetWindows
+	}
+	if target != core.TargetWindows && target != core.TargetLinux {
+		return result, exit(2, "Hyper-V checkpoints require target=windows or target=linux")
+	}
+	if target == core.TargetLinux {
+		if err := b.verifyLinuxProductionCheckpointSupport(ctx, sourceName, source.ID); err != nil {
+			return result, err
+		}
+		sourceFirmware, err = b.queryVMFirmwareSettings(ctx, sourceName, source.ID)
+		if err != nil {
+			return result, err
+		}
+	}
 	paths, err := checkpointArtifactForCreate(req.ArtifactDir)
 	if err != nil {
 		return result, err
@@ -393,11 +421,16 @@ func (b *backend) createNativeCheckpoint(ctx context.Context, req core.NativeChe
 		checkpointMetadataSnapshotID:     output.SnapshotID,
 		checkpointMetadataSnapshotName:   output.SnapshotName,
 		checkpointMetadataCheckpointType: "ProductionOnly",
-		checkpointMetadataTarget:         core.TargetWindows,
+		checkpointMetadataTarget:         target,
 		checkpointMetadataProviderScope:  instanceScope(sourceName),
 		checkpointMetadataSSHUser:        firstNonBlank(req.Server.Labels["ssh_user"], req.Config.HyperV.User),
 		checkpointMetadataWorkRoot:       firstNonBlank(req.Server.Labels["work_root"], req.Config.HyperV.WorkRoot),
 		checkpointMetadataSwitch:         req.Config.HyperV.Switch,
+	}
+	if target == core.TargetLinux {
+		metadata[checkpointMetadataSpecialization] = linuxForkSpecializationVersion
+		metadata[checkpointMetadataSecureBoot] = fmt.Sprintf("%t", sourceFirmware.enabled)
+		metadata[checkpointMetadataSecureTemplate] = sourceFirmware.template
 	}
 	committed = true
 	return core.NativeCheckpointCreateResult{
@@ -568,6 +601,16 @@ func (b *backend) restoreNativeCheckpoint(ctx context.Context, req core.NativeCh
 		return LeaseTarget{}, exit(4, "Hyper-V source lease %s has no local claim", sourceLease)
 	}
 	cfg := b.configForRun()
+	target, err := checkpointTarget(req.Record.Metadata)
+	if err != nil {
+		return LeaseTarget{}, err
+	}
+	cfg.TargetOS = target
+	if target == core.TargetWindows {
+		cfg.WindowsMode = core.WindowsModeNormal
+	} else {
+		cfg.WindowsMode = ""
+	}
 	if value := strings.TrimSpace(req.Record.Metadata[checkpointMetadataSSHUser]); value != "" {
 		cfg.HyperV.User = value
 		cfg.SSHUser = value
@@ -682,11 +725,27 @@ func (b *backend) ForkNativeCheckpoint(ctx context.Context, req core.NativeCheck
 		return lease, exit(2, "provider=%s checkpoint fork requires a Windows host with Hyper-V enabled", providerName)
 	}
 	cfg := b.configForRun()
-	if strings.TrimSpace(cfg.HyperV.GuestPassword) == "" {
-		return lease, exit(2, "provider=%s checkpoint fork requires CRABBOX_HYPERV_GUEST_PASSWORD or trusted hyperv.guestPassword", providerName)
+	target, err := checkpointTarget(req.Record.Metadata)
+	if err != nil {
+		return lease, err
 	}
-	if !validHyperVSSHUser(cfg.HyperV.User) {
-		return lease, exit(2, "provider=%s checkpoint fork requires a valid Hyper-V guest user", providerName)
+	cfg.TargetOS = target
+	if target == core.TargetWindows {
+		cfg.WindowsMode = core.WindowsModeNormal
+		if strings.TrimSpace(cfg.HyperV.GuestPassword) == "" {
+			return lease, exit(2, "provider=%s checkpoint fork requires CRABBOX_HYPERV_GUEST_PASSWORD or trusted hyperv.guestPassword", providerName)
+		}
+		if !validHyperVSSHUser(cfg.HyperV.User) {
+			return lease, exit(2, "provider=%s checkpoint fork requires a valid Hyper-V guest user", providerName)
+		}
+	} else {
+		cfg.WindowsMode = ""
+		if err := requireLinuxForkSpecializationMetadata(req.Record.Metadata); err != nil {
+			return lease, err
+		}
+		if !validLinuxSSHUser(cfg.HyperV.User) {
+			return lease, exit(2, "provider=%s target=linux checkpoint fork requires a valid Linux SSH user", providerName)
+		}
 	}
 	if strings.TrimSpace(req.Repo.Root) == "" {
 		return lease, exit(2, "provider=%s checkpoint fork requires a repository root", providerName)
@@ -735,35 +794,48 @@ func (b *backend) ForkNativeCheckpoint(ctx context.Context, req core.NativeCheck
 		if committed {
 			return
 		}
-		cleanupErr := b.removeImportedCheckpointVM(context.Background(), name)
+		cleanupErr := errors.Join(
+			b.detachAndRemoveNoCloudSeed(context.Background(), name),
+			b.removeImportedCheckpointVM(context.Background(), name),
+		)
 		if cleanupErr == nil {
 			pruneLeaseState(leaseID)
 		}
 		err = errors.Join(err, cleanupErr)
 	}()
 
-	importedID, err := b.importCheckpointVM(ctx, paths.config, name)
+	importedID, err := b.importCheckpointVM(ctx, paths.config, name, target == core.TargetWindows)
 	if err != nil {
 		return lease, err
 	}
 	if strings.EqualFold(importedID, strings.TrimSpace(req.Record.Metadata[checkpointMetadataSourceVMID])) {
 		return lease, exit(2, "Import-VM did not generate a fresh Hyper-V VM identity")
 	}
-	if err := b.waitGuestReady(ctx, name, cfg.HyperV.User); err != nil {
-		return lease, fmt.Errorf("forked guest did not become reachable over PowerShell Direct: %w", err)
-	}
 	hostname := forkGuestHostname(leaseID)
-	if err := b.rotateForkGuestIdentity(ctx, name, cfg.HyperV.User, publicKey, hostname); err != nil {
-		return lease, err
-	}
-	if err := b.restartVM(ctx, name); err != nil {
-		return lease, err
-	}
-	if err := b.waitGuestReady(ctx, name, cfg.HyperV.User); err != nil {
-		return lease, fmt.Errorf("forked guest did not return after identity rotation: %w", err)
-	}
-	if err := b.connectVMNetwork(ctx, name, cfg.HyperV.Switch); err != nil {
-		return lease, err
+	if target == core.TargetLinux {
+		firmware, err := checkpointFirmwareSettings(req.Record.Metadata)
+		if err != nil {
+			return lease, err
+		}
+		if err := b.specializeLinuxCheckpointFork(ctx, cfg, firmware, name, leaseID, publicKey, hostname); err != nil {
+			return lease, err
+		}
+	} else {
+		if err := b.waitGuestReady(ctx, name, cfg.HyperV.User); err != nil {
+			return lease, fmt.Errorf("forked guest did not become reachable over PowerShell Direct: %w", err)
+		}
+		if err := b.rotateForkGuestIdentity(ctx, name, cfg.HyperV.User, publicKey, hostname); err != nil {
+			return lease, err
+		}
+		if err := b.restartVM(ctx, name); err != nil {
+			return lease, err
+		}
+		if err := b.waitGuestReady(ctx, name, cfg.HyperV.User); err != nil {
+			return lease, fmt.Errorf("forked guest did not return after identity rotation: %w", err)
+		}
+		if err := b.connectVMNetwork(ctx, name, cfg.HyperV.Switch); err != nil {
+			return lease, err
+		}
 	}
 	ip, err := b.waitForIP(ctx, name, 5*time.Minute)
 	if err != nil {
@@ -780,7 +852,7 @@ func (b *backend) ForkNativeCheckpoint(ctx context.Context, req core.NativeCheck
 	return lease, nil
 }
 
-func (b *backend) importCheckpointVM(ctx context.Context, configPath, name string) (string, error) {
+func (b *backend) importCheckpointVM(ctx context.Context, configPath, name string, start bool) (string, error) {
 	vmPath := filepath.Join(hypervVMDir(), name)
 	snapshotPath := filepath.Join(vmPath, "Snapshots")
 	vhdPath := filepath.Join(hypervVHDDir(), name)
@@ -788,6 +860,10 @@ func (b *backend) importCheckpointVM(ctx context.Context, configPath, name strin
 		if err := os.MkdirAll(path, 0o700); err != nil {
 			return "", exit(2, "create Hyper-V checkpoint fork directory %s: %v", path, err)
 		}
+	}
+	startScript := ""
+	if start {
+		startScript = `Start-VM -VM $vm -ErrorAction Stop; `
 	}
 	script := fmt.Sprintf(
 		`$ErrorActionPreference='Stop'; `+
@@ -799,7 +875,7 @@ func (b *backend) importCheckpointVM(ctx context.Context, configPath, name strin
 			`Get-VMNetworkAdapter -VM $vm | Set-VMNetworkAdapter -DynamicMacAddress -ErrorAction Stop; `+
 			`Get-VMNetworkAdapter -VM $vm | Disconnect-VMNetworkAdapter -ErrorAction Stop; `+
 			`Set-VM -VM $vm -AutomaticCheckpointsEnabled $false -CheckpointType ProductionOnly -ErrorAction Stop; `+
-			`Start-VM -VM $vm -ErrorAction Stop; `+
+			`%s`+
 			`[pscustomobject]@{ID=$vm.Id.Guid} | ConvertTo-Json -Compress `+
 			`} catch { `+
 			`if ($vm) { Stop-VM -VM $vm -Force -Confirm:$false -ErrorAction SilentlyContinue; Remove-VM -VM $vm -Force -Confirm:$false -ErrorAction SilentlyContinue }; `+
@@ -809,6 +885,7 @@ func (b *backend) importCheckpointVM(ctx context.Context, configPath, name strin
 		escapePSString(snapshotPath),
 		escapePSString(vhdPath),
 		escapePSString(name),
+		startScript,
 	)
 	result, err := b.powershell(ctx, script)
 	if err != nil {

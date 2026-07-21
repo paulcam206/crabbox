@@ -2,6 +2,7 @@ package hyperv
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 )
@@ -14,6 +15,11 @@ const (
 type firmwareSettings struct {
 	enabled  bool
 	template string
+}
+
+type firmwareOutput struct {
+	Enabled  bool   `json:"Enabled"`
+	Template string `json:"Template"`
 }
 
 func normalizeSecureBootMode(value string) string {
@@ -51,6 +57,10 @@ func (b *backend) configureVMFirmware(ctx context.Context, cfg Config, name stri
 	if err != nil {
 		return err
 	}
+	return b.configureVMFirmwareSettings(ctx, name, settings)
+}
+
+func (b *backend) configureVMFirmwareSettings(ctx context.Context, name string, settings firmwareSettings) error {
 	script := fmt.Sprintf(
 		`Set-VMFirmware -VMName '%s' -EnableSecureBoot Off`,
 		escapePSString(name),
@@ -66,4 +76,28 @@ func (b *backend) configureVMFirmware(ctx context.Context, cfg Config, name stri
 		return commandError("Set-VMFirmware", result, err)
 	}
 	return nil
+}
+
+func (b *backend) queryVMFirmwareSettings(ctx context.Context, name, id string) (firmwareSettings, error) {
+	script := fmt.Sprintf(
+		`$ErrorActionPreference='Stop'; `+
+			`$vm=Get-VM -Name '%s' -ErrorAction Stop; `+
+			`if ($vm.Id.Guid -ne '%s') { throw 'source VM identity changed' }; `+
+			`$firmware=Get-VMFirmware -VM $vm -ErrorAction Stop; `+
+			`[pscustomobject]@{Enabled=([string]$firmware.SecureBoot -eq 'On');Template=[string]$firmware.SecureBootTemplate} | ConvertTo-Json -Compress`,
+		escapePSString(name),
+		escapePSString(id),
+	)
+	result, err := b.powershell(ctx, script)
+	if err != nil {
+		return firmwareSettings{}, commandError("Get-VMFirmware", result, err)
+	}
+	var output firmwareOutput
+	if err := json.Unmarshal([]byte(strings.TrimSpace(result.Stdout)), &output); err != nil {
+		return firmwareSettings{}, exit(2, "parse Hyper-V firmware settings: %v", err)
+	}
+	if output.Enabled && strings.TrimSpace(output.Template) == "" {
+		return firmwareSettings{}, exit(2, "Hyper-V VM %s has secure boot enabled without a template", name)
+	}
+	return firmwareSettings{enabled: output.Enabled, template: strings.TrimSpace(output.Template)}, nil
 }
