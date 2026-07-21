@@ -52,6 +52,9 @@ func validateRequestedCapabilities(cfg Config) error {
 	if cfg.Browser && !featureSetHas(features, FeatureBrowser) {
 		return exit(2, "browser provisioning is not supported for provider=%s", provider.Name())
 	}
+	if cfg.Provider == "azure" && cfg.TargetOS == targetWindows && (cfg.Browser || cfg.Code || cfg.Tailscale.Enabled) {
+		return exit(2, "provider=azure target=windows currently supports SSH, sync, run, and desktop/VNC; browser/code/tailscale require Linux or AWS Windows where supported")
+	}
 	if cfg.Code && cfg.TargetOS != targetLinux {
 		return exit(2, "web code currently supports managed Linux leases only")
 	}
@@ -60,9 +63,6 @@ func validateRequestedCapabilities(cfg Config) error {
 	}
 	if cfg.TargetOS == targetWindows && cfg.WindowsMode == windowsModeWSL2 && cfg.Desktop {
 		return exit(2, "target=windows --windows-mode wsl2 does not support desktop/VNC; use --windows-mode normal for desktop/VNC or omit --desktop for WSL2")
-	}
-	if cfg.Provider == "azure" && cfg.TargetOS == targetWindows && (cfg.Browser || cfg.Code || cfg.Tailscale.Enabled) {
-		return exit(2, "provider=azure target=windows currently supports SSH, sync, run, and desktop/VNC; browser/code/tailscale require Linux or AWS Windows where supported")
 	}
 	return nil
 }

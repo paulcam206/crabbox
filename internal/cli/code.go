@@ -186,6 +186,9 @@ func selectCodeConnectionMode(spec ProviderSpec, targetOS, windowsMode string, u
 		return 0, exit(2, "code requires an SSH lease provider")
 	}
 	features := spec.FeaturesForTarget(targetOS, windowsMode)
+	if targetOS != targetLinux || !features.Has(FeatureCode) {
+		return 0, exit(2, "code requires a managed Linux target that advertises code support")
+	}
 	if spec.Coordinator == CoordinatorNever {
 		if !features.Has(FeatureCleanup) {
 			return 0, exit(2, "code requires a managed SSH lease; provider=%s does not advertise managed cleanup", spec.Name)
