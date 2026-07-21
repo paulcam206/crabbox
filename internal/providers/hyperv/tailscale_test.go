@@ -240,7 +240,7 @@ func TestUpdateTailscaleMetadataRequiresExactClaimAndPersistsAtomically(t *testi
 	}
 	lease := LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}
 	req := AcquireRequest{Repo: core.Repo{Root: t.TempDir()}}
-	if err := persistLease(leaseID, slug, name, cfg, req, lease); err != nil {
+	if err := persistLease(leaseID, slug, name, cfg, req, lease, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -326,7 +326,7 @@ func TestReleaseRunsTailscaleCleanupBeforeVMRemoval(t *testing.T) {
 		WindowsMode: core.WindowsModeNormal,
 	}
 	lease := LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}
-	if err := persistLease(leaseID, slug, name, cfg, AcquireRequest{Repo: core.Repo{Root: t.TempDir()}}, lease); err != nil {
+	if err := persistLease(leaseID, slug, name, cfg, AcquireRequest{Repo: core.Repo{Root: t.TempDir()}}, lease, nil); err != nil {
 		t.Fatal(err)
 	}
 

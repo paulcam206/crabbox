@@ -46,6 +46,7 @@ func providerCommonFeatures() core.FeatureSet {
 		core.FeatureCleanup,
 		core.FeaturePauseResume,
 		core.FeatureTailscale,
+		core.FeatureCacheVolume,
 	}
 }
 
