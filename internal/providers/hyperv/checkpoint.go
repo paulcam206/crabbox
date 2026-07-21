@@ -516,18 +516,27 @@ func (b *backend) resumeCheckpointCacheSource(ctx context.Context, name string, 
 		defer cancel()
 		return target, false, errors.Join(operationErr, b.restoreCheckpointSourceState(restoreCtx, name, state))
 	}
-	if cfg.TargetOS == core.TargetLinux {
+	targetOS := strings.TrimSpace(target.TargetOS)
+	if targetOS == "" {
+		targetOS = cfg.TargetOS
+	}
+	resolvedCfg := cfg
+	resolvedCfg.TargetOS = targetOS
+	if targetOS == core.TargetLinux {
+		resolvedCfg.WindowsMode = ""
+	}
+	if targetOS == core.TargetLinux {
 		ip, err := b.waitForIP(ctx, name, 5*time.Minute)
 		if err != nil {
 			return restoreOnError(err)
 		}
-		target = sshTargetFromConfig(cfg, ip)
+		target = sshTargetFromConfig(resolvedCfg, ip)
 		target.Port = sshPort
 		target.FallbackPorts = []string{}
-		if err := b.sshReady(ctx, &target, b.rt.Stderr, "hyperv checkpoint ssh", bootstrapWaitTimeout(cfg)); err != nil {
+		if err := b.sshReady(ctx, &target, b.rt.Stderr, "hyperv checkpoint ssh", bootstrapWaitTimeout(resolvedCfg)); err != nil {
 			return restoreOnError(err)
 		}
-	} else if err := b.waitGuestReady(ctx, name, cfg.HyperV.User); err != nil {
+	} else if err := b.waitGuestReady(ctx, name, resolvedCfg.HyperV.User); err != nil {
 		return restoreOnError(err)
 	}
 	return target, true, nil
