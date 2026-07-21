@@ -213,6 +213,38 @@ func TestTailscaleLifecycleScriptsAreTargetAware(t *testing.T) {
 	}
 }
 
+func TestTailscaleSSHBootstrapKeepsAuthKeyOutOfRemoteScript(t *testing.T) {
+	cfg := baseConfig()
+	cfg.TargetOS = TargetLinux
+	cfg.Tailscale.Enabled = true
+	cfg.Tailscale.AuthKey = "invalid-tailscale-auth-fixture"
+	cfg.Tailscale.Hostname = "crabbox-fork"
+	cfg.Tailscale.ScrubCloudInitSecrets = true
+
+	remote, input, err := tailscaleSSHBootstrapPayload(cfg, SSHTarget{TargetOS: TargetLinux})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(remote, cfg.Tailscale.AuthKey) {
+		t.Fatal("Tailscale auth key leaked into the SSH remote command")
+	}
+	keyLine, script, ok := strings.Cut(input, "\n")
+	if !ok || keyLine != cfg.Tailscale.AuthKey {
+		t.Fatalf("stdin auth framing=%q", input)
+	}
+	if strings.Contains(script, cfg.Tailscale.AuthKey) {
+		t.Fatal("Tailscale auth key leaked into the remote bootstrap script")
+	}
+	if !strings.Contains(script, `: "${TS_AUTHKEY:?}"`) ||
+		!strings.Contains(script, "tailscale up --auth-key=file:/dev/stdin") {
+		t.Fatalf("direct Tailscale bootstrap script=%s", script)
+	}
+	if strings.Contains(script, "crabbox-cloud-init-secret-cleanup") ||
+		strings.Contains(script, "/etc/cloud/cloud-init.disabled") {
+		t.Fatalf("direct Tailscale bootstrap mutated fresh cloud-init state: %s", script)
+	}
+}
+
 func TestRenderTailscaleHostname(t *testing.T) {
 	got := renderTailscaleHostname("CBX-{slug}-{provider}-{id}", "cbx_abcdef123456", "Blue Lobster", "aws")
 	if got != "cbx-blue-lobster-aws-cbx-abcdef123456" {

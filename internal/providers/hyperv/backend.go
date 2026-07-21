@@ -37,6 +37,7 @@ type backend struct {
 	waitWindowsVNC         func(context.Context, *SSHTarget, io.Writer, time.Duration) error
 	ensureLeaseKey         func(Config, string) (string, string, error)
 	logoutTailscale        func(context.Context, core.SSHTarget) (string, error)
+	bootstrapTailscale     func(context.Context, Config, core.SSHTarget) (string, error)
 	runSSHOutput           func(context.Context, SSHTarget, string) (string, error)
 	cacheRoot              string
 }
@@ -74,6 +75,7 @@ func newBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
 		ensureLeaseKey:         ensureTestboxKeyForConfig,
 		waitWindowsVNC:         core.WaitForManagedWindowsLoopbackVNC,
 		logoutTailscale:        core.LogoutTailscaleTarget,
+		bootstrapTailscale:     core.BootstrapTailscaleTarget,
 		runSSHOutput:           core.RunSSHOutput,
 		cacheRoot:              hypervCacheRoot(),
 	}

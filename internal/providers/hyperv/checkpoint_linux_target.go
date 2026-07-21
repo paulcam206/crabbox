@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	linuxForkSpecializationVersion = "nocloud-v1"
+	linuxForkSpecializationVersion = "nocloud-v2"
 	linuxForkSpecializationMarker  = "/var/lib/crabbox/checkpoint-fork-specialized"
 	linuxForkSeedCompletionMarker  = "crabbox-specialized"
 	linuxForkSpecializationTimeout = 10 * time.Minute
@@ -104,10 +104,7 @@ func linuxForkSpecializationInstanceID(leaseID string) string {
 }
 
 func linuxForkExternalStateResetCommands() []string {
-	return []string{
-		"systemctl stop tailscaled.service 2>/dev/null || true",
-		"rm -rf /var/lib/tailscale /var/cache/tailscale /etc/tailscale",
-	}
+	return strings.Split(core.TailscaleIdentityResetScript(core.TargetLinux, ""), "\n")
 }
 
 func linuxForkSpecializationUserData(user, publicKey, hostname, instanceID string) string {
