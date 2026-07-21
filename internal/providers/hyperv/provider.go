@@ -47,16 +47,23 @@ func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error
 }
 
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
-	if cfg.TargetOS != "" && cfg.TargetOS != core.TargetLinux && cfg.TargetOS != core.TargetWindows {
+	targetOS := cfg.TargetOS
+	if targetOS == "" {
+		targetOS = core.TargetWindows
+	}
+	if targetOS != core.TargetLinux && targetOS != core.TargetWindows {
 		return nil, core.Exit(2, "provider=%s supports target=linux or target=windows", providerName)
 	}
-	if cfg.TargetOS == core.TargetWindows && cfg.WindowsMode != "" && cfg.WindowsMode != core.WindowsModeNormal {
+	if targetOS == core.TargetWindows && cfg.WindowsMode != "" && cfg.WindowsMode != core.WindowsModeNormal {
 		return nil, core.Exit(2, "provider=%s supports windows.mode=normal only", providerName)
 	}
-	if cfg.TargetOS == core.TargetLinux && cfg.HyperV.InitPassword {
+	if targetOS == core.TargetWindows && (cfg.Desktop || cfg.Browser) {
+		return nil, core.Exit(2, "provider=%s desktop and browser features are supported only for target=linux", providerName)
+	}
+	if targetOS == core.TargetLinux && cfg.HyperV.InitPassword {
 		return nil, core.Exit(2, "--hyperv-init-password is supported only for target=windows")
 	}
-	if _, err := secureBootSettings(cfg.TargetOS, cfg.HyperV.SecureBoot); err != nil {
+	if _, err := secureBootSettings(targetOS, cfg.HyperV.SecureBoot); err != nil {
 		return nil, err
 	}
 	if cfg.Tailscale.Enabled || string(cfg.Network) == "tailscale" {
