@@ -26,8 +26,8 @@ func (b *backend) acquireLinux(ctx context.Context, req AcquireRequest) (LeaseTa
 	if cfg.HyperV.InitPassword {
 		return LeaseTarget{}, exit(2, "--hyperv-init-password is supported only for target=windows")
 	}
-	if !validHyperVSSHUser(cfg.HyperV.User) {
-		return LeaseTarget{}, exit(2, "provider=%s --hyperv-user must contain only letters, digits, dot, underscore, or hyphen", providerName)
+	if !validLinuxSSHUser(cfg.HyperV.User) {
+		return LeaseTarget{}, exit(2, "provider=%s target=linux --hyperv-user must be 1-32 characters, start with a lowercase letter or underscore, and contain only lowercase letters, digits, underscore, or hyphen", providerName)
 	}
 	if strings.TrimSpace(req.Repo.Root) == "" {
 		return LeaseTarget{}, exit(2, "provider=%s requires a repository root so the VM claim can be persisted before bootstrap", providerName)
@@ -117,6 +117,25 @@ func (b *backend) acquireLinux(ctx context.Context, req AcquireRequest) (LeaseTa
 	cleanupKey = false
 	fmt.Fprintf(b.rt.Stderr, "provisioned lease=%s instance=%s target=linux state=ready\n", leaseID, name)
 	return lease, nil
+}
+
+func validLinuxSSHUser(user string) bool {
+	if user != strings.TrimSpace(user) || len(user) == 0 || len(user) > 32 {
+		return false
+	}
+	for i, r := range user {
+		if i == 0 {
+			if (r >= 'a' && r <= 'z') || r == '_' {
+				continue
+			}
+			return false
+		}
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' || r == '-' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func (b *backend) createLinuxVM(ctx context.Context, cfg Config, name, seedPath string) error {

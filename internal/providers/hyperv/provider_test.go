@@ -140,6 +140,17 @@ func TestConfigureAcceptsLinux(t *testing.T) {
 	}
 }
 
+func TestConfigureAcceptsLinuxDesktopAndBrowser(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetLinux
+	cfg.Desktop = true
+	cfg.Browser = true
+	if _, err := (Provider{}).Configure(cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: &recordingRunner{}}); err != nil {
+		t.Fatalf("Configure rejected Linux desktop/browser: %v", err)
+	}
+}
+
 func TestConfigureRejectsMacOS(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
@@ -165,6 +176,21 @@ func TestConfigureAcceptsWindows(t *testing.T) {
 	cfg.WindowsMode = core.WindowsModeNormal
 	if _, err := (Provider{}).Configure(cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: &recordingRunner{}}); err != nil {
 		t.Fatalf("Configure rejected windows target: %v", err)
+	}
+}
+
+func TestConfigureRejectsWindowsDesktopAndBrowser(t *testing.T) {
+	for _, feature := range []string{"desktop", "browser"} {
+		t.Run(feature, func(t *testing.T) {
+			cfg := core.BaseConfig()
+			cfg.Provider = providerName
+			cfg.TargetOS = core.TargetWindows
+			cfg.Desktop = feature == "desktop"
+			cfg.Browser = feature == "browser"
+			if _, err := (Provider{}).Configure(cfg, core.Runtime{}); err == nil || !strings.Contains(err.Error(), "only for target=linux") {
+				t.Fatalf("Configure error=%v", err)
+			}
+		})
 	}
 }
 
