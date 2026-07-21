@@ -926,14 +926,26 @@ func TestCheckpointDockerCommitUsesImageStrategy(t *testing.T) {
 	}
 }
 
+func TestCheckpointHyperVKindUsesNativeDiskSnapshotStrategy(t *testing.T) {
+	if got := checkpointStrategyForKind(checkpointKindHyperV); got != checkpointStrategyDiskSnapshot {
+		t.Fatalf("strategy=%q, want %q", got, checkpointStrategyDiskSnapshot)
+	}
+	if !isNativeCheckpointKind(checkpointKindHyperV) {
+		t.Fatal("Hyper-V checkpoint kind is not native")
+	}
+	if got := checkpointProviderForKind(checkpointKindHyperV); got != "hyperv" {
+		t.Fatalf("provider=%q, want hyperv", got)
+	}
+}
+
 func TestNativeCheckpointForkRecordCarriesNameAndMetadata(t *testing.T) {
 	metadata := map[string]string{"runtime": "docker"}
 	record := checkpointRecord{Kind: checkpointKindDockerCommit, Desktop: true}
 	record.Native.ImageID = "sha256:123"
 	record.Native.Name = "crabbox-checkpoint-demo-123"
 	record.Native.Metadata = metadata
-	got := nativeCheckpointForkRecord(record)
-	if got.Name != "crabbox-checkpoint-demo-123" || got.Metadata["runtime"] != "docker" || !got.Desktop {
+	got := nativeCheckpointForkRecord(record, `C:\checkpoints\chk_demo`)
+	if got.Name != "crabbox-checkpoint-demo-123" || got.ArtifactDir != `C:\checkpoints\chk_demo` || got.Metadata["runtime"] != "docker" || !got.Desktop {
 		t.Fatalf("fork record=%#v", got)
 	}
 }
@@ -1161,6 +1173,7 @@ func TestCreateNativeCheckpointRejectsAzureImageBeforeAdminAndCloudInit(t *testi
 		"cbx_123",
 		"",
 		"repo",
+		"",
 		"",
 		checkpointStrategyImage,
 		true,
@@ -1710,7 +1723,7 @@ func TestApplyAWSMacOSCheckpointForkConfigPreservesTypeWithoutHostPin(t *testing
 	record.Native.ImageID = "snap-000000000001"
 	record.Native.Region = "eu-west-1"
 
-	applyNativeCheckpointForkConfig(&cfg, fs, record)
+	applyNativeCheckpointForkConfig(&cfg, fs, record, "")
 
 	if cfg.Provider != "aws" || cfg.TargetOS != targetMacOS || cfg.AWSSnapshot != "snap-000000000001" {
 		t.Fatalf("aws macOS snapshot config not applied: %#v", cfg)
@@ -1804,7 +1817,7 @@ func TestApplyNativeCheckpointForkConfigForAzureAndGCP(t *testing.T) {
 			cfg := defaultConfig()
 			cfg.Provider = "hetzner"
 			cfg.Class = "standard"
-			if err := applyNativeCheckpointForkConfig(&cfg, fs, tc.record); err != nil {
+			if err := applyNativeCheckpointForkConfig(&cfg, fs, tc.record, ""); err != nil {
 				t.Fatal(err)
 			}
 			tc.check(t, cfg)
@@ -1824,7 +1837,7 @@ func TestApplyNativeCheckpointForkConfigPreservesDesktopCapability(t *testing.T)
 	record.Native.ImageID = "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Compute/snapshots/checkpoint-azure"
 	record.Native.Region = "eastus"
 
-	if err := applyNativeCheckpointForkConfig(&cfg, fs, record); err != nil {
+	if err := applyNativeCheckpointForkConfig(&cfg, fs, record, ""); err != nil {
 		t.Fatal(err)
 	}
 	if !cfg.Desktop {
@@ -1844,7 +1857,7 @@ func TestApplyNativeCheckpointForkConfigForParallelsPreservesLinkedCloneMode(t *
 	record.Native.State = "poweron"
 	record.Native.Region = "mac-host"
 
-	if err := applyNativeCheckpointForkConfig(&cfg, fs, record); err != nil {
+	if err := applyNativeCheckpointForkConfig(&cfg, fs, record, ""); err != nil {
 		t.Fatal(err)
 	}
 	if cfg.Provider != "parallels" || cfg.Parallels.SourceID != "vm1" || cfg.Parallels.SourceSnapshotID != "{snap1}" || cfg.Parallels.Host != "mac-host" {
@@ -1863,7 +1876,7 @@ func TestApplyNativeCheckpointForkConfigForParallelsPreservesLinkedCloneMode(t *
 	if err := parseFlags(fs, []string{"--parallels-clone-mode", "linked"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := applyNativeCheckpointForkConfig(&cfg, fs, record); err != nil {
+	if err := applyNativeCheckpointForkConfig(&cfg, fs, record, ""); err != nil {
 		t.Fatal(err)
 	}
 	if cfg.Parallels.CloneMode != "linked" {
@@ -1884,7 +1897,7 @@ func TestApplyNativeCheckpointForkConfigHonorsAzureOSDiskFlagAfterProviderRewrit
 	record := checkpointRecord{Kind: checkpointKindAzureOS, TargetOS: targetLinux}
 	record.Native.ImageID = "checkpoint-azure"
 
-	if err := applyNativeCheckpointForkConfig(&cfg, fs, record); err != nil {
+	if err := applyNativeCheckpointForkConfig(&cfg, fs, record, ""); err != nil {
 		t.Fatal(err)
 	}
 	if cfg.Provider != "azure" {
@@ -1909,7 +1922,7 @@ func TestApplyNativeCheckpointForkConfigHonorsEmptyAzureOSDiskFlag(t *testing.T)
 	record := checkpointRecord{Kind: checkpointKindAzureOS, TargetOS: targetLinux}
 	record.Native.ImageID = "checkpoint-azure"
 
-	if err := applyNativeCheckpointForkConfig(&cfg, fs, record); err != nil {
+	if err := applyNativeCheckpointForkConfig(&cfg, fs, record, ""); err != nil {
 		t.Fatal(err)
 	}
 	if cfg.Provider != "azure" {
@@ -1942,7 +1955,7 @@ func TestApplyNativeCheckpointForkConfigReappliesFinalProviderFlags(t *testing.T
 		"container_work_root": "/workspace/crabbox",
 	}
 
-	if err := applyNativeCheckpointForkConfigAndFlags(&cfg, fs, record, leaseFlags.ProviderFlags); err != nil {
+	if err := applyNativeCheckpointForkConfigAndFlags(&cfg, fs, record, "", leaseFlags.ProviderFlags); err != nil {
 		t.Fatal(err)
 	}
 	if cfg.Provider != "local-container" {
@@ -1977,7 +1990,7 @@ func TestApplyNativeCheckpointForkConfigDoesNotReapplyIdentityFlags(t *testing.T
 		"container_work_root": "/workspace/crabbox",
 	}
 
-	if err := applyNativeCheckpointForkConfigAndFlags(&cfg, fs, record, leaseFlags.ProviderFlags); err != nil {
+	if err := applyNativeCheckpointForkConfigAndFlags(&cfg, fs, record, "", leaseFlags.ProviderFlags); err != nil {
 		t.Fatal(err)
 	}
 	if cfg.LocalContainer.Image != "sha256:checkpoint" {

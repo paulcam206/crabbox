@@ -242,6 +242,7 @@ type ReleaseLeaseClaimRetainer interface {
 type NativeCheckpointCapability struct {
 	Kind              string
 	Direct            bool
+	PreferredForAuto  bool
 	CreateUnsupported string
 }
 
@@ -270,12 +271,14 @@ type NativeCheckpointImage struct {
 
 type NativeCheckpointCreateRequest struct {
 	Config      Config
+	Runtime     Runtime
 	Server      Server
 	Target      SSHTarget
 	LeaseID     string
 	Name        string
 	RepoName    string
 	Workdir     string
+	ArtifactDir string
 	Strategy    string
 	NoReboot    bool
 	Wait        bool
@@ -297,9 +300,11 @@ type NativeCheckpointWorkdirRequest struct {
 }
 
 type NativeCheckpointResourceRequest struct {
-	Config   Config
-	Image    NativeCheckpointImage
-	Metadata map[string]string
+	Config      Config
+	Runtime     Runtime
+	ArtifactDir string
+	Image       NativeCheckpointImage
+	Metadata    map[string]string
 }
 
 type NativeCheckpointVerifyResult struct {
@@ -320,6 +325,7 @@ type NativeCheckpointForkRecord struct {
 	ImageID     string
 	Name        string
 	Resource    string
+	ArtifactDir string
 	Region      string
 	Project     string
 	Direct      bool
@@ -343,8 +349,37 @@ type NativeCheckpointForkProvider interface {
 	ApplyNativeCheckpointForkConfig(req NativeCheckpointForkRequest) error
 }
 
+type NativeCheckpointForkLifecycleRequest struct {
+	Record        NativeCheckpointForkRecord
+	Repo          Repo
+	Keep          bool
+	Reclaim       bool
+	RequestedSlug string
+}
+
+type NativeCheckpointForkLifecycleProvider interface {
+	ForkNativeCheckpoint(ctx context.Context, req NativeCheckpointForkLifecycleRequest) (LeaseTarget, error)
+}
+
 type NativeCheckpointForkFlagProvider interface {
 	ApplyNativeCheckpointForkFlags(cfg *Config, fs *flag.FlagSet, values any) error
+}
+
+type NativeCheckpointRestoreRequest struct {
+	Config  Config
+	Runtime Runtime
+	Record  NativeCheckpointForkRecord
+	LeaseID string
+	Repo    Repo
+	Reclaim bool
+}
+
+type NativeCheckpointRestoreResult struct {
+	Lease LeaseTarget
+}
+
+type NativeCheckpointRestoreProvider interface {
+	RestoreNativeCheckpoint(ctx context.Context, req NativeCheckpointRestoreRequest) (NativeCheckpointRestoreResult, error)
 }
 
 type JSONListBackend interface {
