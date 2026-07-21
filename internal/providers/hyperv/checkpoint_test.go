@@ -364,6 +364,41 @@ func TestCreateNativeCheckpointPreservesPausedCacheBackedLease(t *testing.T) {
 	}
 }
 
+func TestResumeCheckpointCacheSourceUsesResolvedTarget(t *testing.T) {
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	runner.respond = func(req core.LocalCommandRequest) (core.LocalCommandResult, error, bool) {
+		if strings.Contains(commandScript(req), "Select-Object -ExpandProperty IPAddresses") {
+			return core.LocalCommandResult{Stdout: `["192.0.2.88"]`}, nil, true
+		}
+		return core.LocalCommandResult{}, nil, false
+	}
+	b := testBackend(runner)
+	sshReady := false
+	b.sshReady = func(_ context.Context, target *SSHTarget, _ io.Writer, _ string, _ time.Duration) error {
+		sshReady = true
+		if target.TargetOS != core.TargetLinux || target.Host != "192.0.2.88" {
+			t.Fatalf("resolved target=%#v", target)
+		}
+		return nil
+	}
+	target, transitioned, err := b.resumeCheckpointCacheSource(
+		context.Background(),
+		testCheckpointVMName,
+		hypervStateSaved,
+		b.cfg,
+		core.SSHTarget{TargetOS: core.TargetLinux},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !transitioned || !sshReady || target.TargetOS != core.TargetLinux || target.Host != "192.0.2.88" {
+		t.Fatalf("target=%#v transitioned=%t sshReady=%t", target, transitioned, sshReady)
+	}
+	if findCallIndex(runner.calls, "Invoke-Command") >= 0 {
+		t.Fatal("resolved Linux target used Windows guest readiness")
+	}
+}
+
 func TestCreateNativeCheckpointLinuxVerifiesProductionSupport(t *testing.T) {
 	setCheckpointTestState(t)
 	artifactDir := t.TempDir()
