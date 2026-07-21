@@ -14,7 +14,11 @@ func cloudInitSeedPath(name string) string {
 }
 
 func cloudInitMetaData(name string) string {
-	return fmt.Sprintf("instance-id: %s\nlocal-hostname: %s\n", name, name)
+	return cloudInitMetaDataForInstance(name, name)
+}
+
+func cloudInitMetaDataForInstance(instanceID, hostname string) string {
+	return fmt.Sprintf("instance-id: %s\nlocal-hostname: %s\n", instanceID, hostname)
 }
 
 func (b *backend) createNoCloudSeed(ctx context.Context, path, userData, metaData string) error {
@@ -95,8 +99,19 @@ func writeNoCloudSource(dir, pattern, content string) (string, error) {
 	return path, nil
 }
 
-func (b *backend) detachAndRemoveNoCloudSeed(ctx context.Context, name string) error {
-	path := cloudInitSeedPath(name)
+func (b *backend) attachNoCloudSeed(ctx context.Context, name, path string) error {
+	script := fmt.Sprintf(
+		`Add-VMHardDiskDrive -VMName '%s' -ControllerType SCSI -ControllerNumber 0 -ControllerLocation 1 -Path '%s'`,
+		escapePSString(name), escapePSString(path),
+	)
+	result, err := b.powershell(ctx, script)
+	if err != nil {
+		return commandError("attach NoCloud seed disk", result, err)
+	}
+	return nil
+}
+
+func (b *backend) detachNoCloudSeed(ctx context.Context, name, path string) error {
 	script := fmt.Sprintf(
 		`$disk = Get-VMHardDiskDrive -VMName '%s' -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq '%s' }; `+
 			`if ($disk) { $disk | Remove-VMHardDiskDrive -ErrorAction Stop }`,
@@ -106,8 +121,20 @@ func (b *backend) detachAndRemoveNoCloudSeed(ctx context.Context, name string) e
 	if err != nil {
 		return commandError("detach NoCloud seed disk", result, err)
 	}
+	return nil
+}
+
+func removeNoCloudSeed(path string) error {
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove NoCloud seed disk %s: %w", path, err)
 	}
 	return nil
+}
+
+func (b *backend) detachAndRemoveNoCloudSeed(ctx context.Context, name string) error {
+	path := cloudInitSeedPath(name)
+	if err := b.detachNoCloudSeed(ctx, name, path); err != nil {
+		return err
+	}
+	return removeNoCloudSeed(path)
 }

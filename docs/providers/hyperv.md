@@ -18,7 +18,7 @@ is the default target when `--target` is omitted.
 | SSH, Crabbox sync, cleanup | Yes | Yes |
 | Pause and resume | Yes | Yes |
 | Desktop and browser | Yes, through cloud-init | Yes, through PowerShell Direct |
-| Workspace checkpoint, fork, restore, provider snapshot | No | Yes |
+| Workspace checkpoint, fork, restore, provider snapshot | Yes | Yes |
 | Tailscale | Yes, through cloud-init | Yes, through PowerShell Direct |
 | Cache volume | Yes | Yes |
 | Code | No | No |
@@ -36,6 +36,8 @@ reject configuration on non-Windows hosts.
   - cloud-init NoCloud support
   - current Hyper-V integration services, including a running
     `hv_kvp_daemon` KVP service so Hyper-V can report guest IPs
+  - the enabled Hyper-V VSS/file-system-freeze integration service backed by a
+    running `hv_vss_daemon` so production checkpoints can quiesce filesystems
   - DHCP networking
   - guest internet access for first-boot apt packages and optional Tailscale
     installation
@@ -319,10 +321,51 @@ lease; there is no implicit destructive cache-volume purge.
 ## Workspace checkpoints
 
 Workspace checkpoint, fork, restore, and provider snapshot capabilities are
-available for Windows normal leases only. They use Hyper-V production
-checkpoints and exported VM artifacts. Linux checkpoint specialization is not
-implemented yet, so Linux targets do not advertise these capabilities and the
-native checkpoint capability probe rejects them.
+available for Linux and Windows normal leases. Both targets use
+`CheckpointType ProductionOnly`; Crabbox never permits Hyper-V to fall back to
+a standard checkpoint. Before creating a Linux checkpoint, Crabbox verifies
+that the VM's VSS integration service is enabled and reports `OK`. A missing,
+disabled, unreachable, or protocol-mismatched service fails with guidance to
+start `hv_vss_daemon`.
+
+Checkpoint exports remain owned by the checkpoint artifact directory and
+survive release of the source lease. Restore is source-only: it verifies the
+exact original VM identity and lease claim, applies the production checkpoint,
+re-resolves DHCP/SSH, and refreshes the claim without changing the source
+hostname or SSH identity.
+
+Windows forks retain the PowerShell Direct identity-rotation flow. Linux forks
+use an offline NoCloud specialization sequence because an exported checkpoint
+contains copied SSH login and host keys, hostname, cloud-init state, and
+possibly Tailscale identity:
+
+1. Import the exported VM with a generated Hyper-V VM ID and dynamic MAC while
+   leaving its network adapter disconnected and the VM powered off.
+2. Create and attach a separate `cidata` VHDX with a fresh NoCloud instance ID.
+   Reapply the exact source secure-boot enabled state and template recorded at
+   checkpoint creation rather than using the current host configuration.
+3. Boot while disconnected. The one-shot specialization replaces every copied
+   `authorized_keys` file with the new lease key, regenerates SSH host keys,
+   assigns the new hostname and machine ID, stops and clears Tailscale identity
+   state, removes copied source cloud-init instance directories while preserving
+   the new NoCloud instance state, and writes
+   `/var/lib/crabbox/checkpoint-fork-specialized` plus an instance-specific
+   completion marker on the seed disk.
+4. Cloud-init powers the guest off. Crabbox waits for Hyper-V to report the
+   host-visible `Off` state, detaches the seed while networking is still
+   disconnected, and mounts the FAT seed on the host to verify that the marker
+   matches the new NoCloud instance ID. Guest network signals are not trusted
+   for this phase.
+5. Delete the verified specialization seed, connect the configured switch,
+   start the VM, wait for DHCP and SSH/`crabbox-ready`, and persist the new
+   exact claim and endpoint.
+
+The checkpoint metadata key `linux_fork_specialization` versions this offline
+contract. B10 cache/Tailscale integration should extend the provider-local
+`linuxForkExternalStateResetCommands` hook and bump that version when reset
+semantics change. Cache-volume work should also add its attachment metadata at
+this boundary so imported cache disks can be detached or rekeyed before the
+network is connected; it should not add a second fork implementation.
 
 Before Windows checkpoint create/export, Hyper-V unmounts and detaches recorded
 cache disks while holding their short host locks, then reattaches them on both
