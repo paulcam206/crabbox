@@ -20,7 +20,8 @@ is the default target when `--target` is omitted.
 | Desktop and browser | Yes, through cloud-init | Yes, through PowerShell Direct |
 | Workspace checkpoint, fork, restore, provider snapshot | No | Yes |
 | Tailscale | Yes, through cloud-init | Yes, through PowerShell Direct |
-| Code, cache volume | No | No |
+| Cache volume | Yes | Yes |
+| Code | No | No |
 
 Hyper-V must be enabled on the host (`Enable-WindowsOptionalFeature -Online
 -FeatureName Microsoft-Hyper-V-All`). The provider is Windows-only and will
@@ -236,6 +237,7 @@ During Linux `Acquire`, the provider:
 4. Discovers the DHCP address through `Get-VMNetworkAdapter`.
 5. Waits for key-only SSH and `/usr/local/bin/crabbox-ready`.
 6. Detaches and deletes the seed VHDX after readiness.
+7. Attaches requested cache VHDXs and initializes/mounts them over SSH.
 
 Linux guest commands are never run through PowerShell Direct.
 
@@ -261,13 +263,58 @@ During Windows `Acquire`, the provider:
    reruns the marked setup idempotently
 10. Waits for SSH readiness on the injected key and, for `--desktop`, loopback
     VNC readiness
-11. With `--browser`, probes for Edge or Chrome without installing either
-12. Records successful desktop/browser lease labels only after all requested
+11. Attaches requested cache VHDXs and initializes/mounts them through bounded
+    PowerShell Direct
+12. With `--browser`, probes for Edge or Chrome without installing either
+13. Records successful desktop/browser/cache lease labels only after all requested
     readiness checks pass
 
 PowerShell Direct calls use the guest administrator password. Readiness and
 later guest operations have bounded retries, preventing a stalled call from
 hanging the lease.
+
+## Cache volumes
+
+Hyper-V supports persistent cache volumes for Linux and Windows normal targets.
+They are rebuildable speed-only state, not source, artifacts, secrets, synced
+workspace data, or checkpoint state.
+
+Each key maps to a provider-owned dynamic VHDX under:
+
+```text
+%USERPROFILE%\Hyper-V\Crabbox Cache Volumes\
+  cache-<key-sha256-prefix>.vhdx
+  cache-<key-sha256-prefix>.json
+  cache-<key-sha256-prefix>.lock
+```
+
+The digest-derived name prevents keys from becoming host paths. The JSON
+sidecar records the original key, target, filesystem, disk identity, size, and
+the Linux filesystem UUID after first format. Reusing a key with an incompatible
+target/filesystem is rejected.
+
+Writable VHDXs are single-writer. Before attach, Crabbox briefly holds the
+per-key host lock and checks all live Hyper-V disk attachments. The lock only
+serializes create/format/attach and checkpoint detach/reattach races; it is not
+treated as lease-lifetime ownership. A required busy volume fails acquire. An
+optional busy volume warns and is omitted from the lease claim.
+
+- Windows disks are initialized once as GPT/NTFS, found by persistent disk ID,
+  and mounted at the configured drive-rooted directory without consuming a
+  drive letter. The directory's drive must already exist in the guest; use
+  `C:\crabbox-cache\<kind>` for ordinary single-disk templates.
+- Linux disks are initialized once as ext4 after cloud-init/SSH readiness,
+  mounted by UUID at the configured POSIX path, and added idempotently to
+  `/etc/fstab`.
+
+Mount paths must be outside the synced work root and cannot be a drive or
+filesystem root. Only successfully mounted `key:path` values are recorded in
+the local claim, so required reuse must prove the attachment.
+
+Release removes the VM attachment but preserves the cache VHDX and metadata.
+Normal provider cleanup never treats the cache root as lease-owned storage and
+does not delete it. `crabbox cache purge` can clear cache contents on an attached
+lease; there is no implicit destructive cache-volume purge.
 
 ## Workspace checkpoints
 
@@ -276,6 +323,15 @@ available for Windows normal leases only. They use Hyper-V production
 checkpoints and exported VM artifacts. Linux checkpoint specialization is not
 implemented yet, so Linux targets do not advertise these capabilities and the
 native checkpoint capability probe rejects them.
+
+Before Windows checkpoint create/export, Hyper-V unmounts and detaches recorded
+cache disks while holding their short host locks, then reattaches them on both
+success and failure. Cache disks are excluded from exported state. Fork import
+also removes legacy inherited non-OS disks before attaching only the new lease's
+requested caches. The shared detach/reattach helpers are target-aware so future
+Linux checkpoint support can reuse the same host lifecycle and add Linux guest
+unmount behavior. A paused or saved cache-backed Windows lease must be resumed
+before checkpoint creation so the guest mount points can be removed safely.
 
 ## Pause and resume
 
