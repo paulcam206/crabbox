@@ -95,7 +95,7 @@ func TestProviderSpecAndAliases(t *testing.T) {
 			{OS: core.TargetWindows, WindowsMode: core.WindowsModeNormal},
 		},
 		TargetFeatures: map[string]core.FeatureSet{
-			core.TargetLinux: providerFeatures(),
+			core.TargetLinux: append(providerFeatures(), core.FeatureCode),
 		},
 		Features: core.FeatureSet{
 			core.FeatureSSH,
@@ -135,10 +135,17 @@ func TestProviderFeaturesAreTargetAware(t *testing.T) {
 		core.FeaturePauseResume,
 		core.FeatureTailscale,
 		core.FeatureCacheVolume,
+		core.FeatureCode,
 	} {
-		if !linux.Has(feature) || !windows.Has(feature) {
-			t.Fatalf("feature %s missing from linux=%v or windows=%v", feature, linux, windows)
+		if !linux.Has(feature) {
+			t.Fatalf("feature %s missing from linux=%v", feature, linux)
 		}
+		if feature != core.FeatureCode && !windows.Has(feature) {
+			t.Fatalf("feature %s missing from windows=%v", feature, windows)
+		}
+	}
+	if windows.Has(core.FeatureCode) {
+		t.Fatalf("windows unexpectedly advertises code: %v", windows)
 	}
 	for _, feature := range []core.Feature{
 		core.FeatureCheckpoint,

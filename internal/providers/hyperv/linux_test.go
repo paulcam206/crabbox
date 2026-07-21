@@ -186,6 +186,7 @@ func TestLinuxAcquireResolveReleaseLifecycle(t *testing.T) {
 	b.cfg.TargetOS = targetLinux
 	b.cfg.HyperV.Image = `C:\Images\debian-cloud.vhdx`
 	b.cfg.HyperV.GuestPassword = ""
+	b.cfg.Code = true
 	var readyTarget SSHTarget
 	b.sshReady = func(_ context.Context, target *SSHTarget, _ io.Writer, phase string, _ time.Duration) error {
 		readyTarget = *target
@@ -204,6 +205,9 @@ func TestLinuxAcquireResolveReleaseLifecycle(t *testing.T) {
 	}
 	if lease.Server.Labels["target"] != targetLinux || lease.SSH.TargetOS != targetLinux {
 		t.Fatalf("lease target labels=%q ssh.target=%q", lease.Server.Labels["target"], lease.SSH.TargetOS)
+	}
+	if lease.Server.Labels["code"] != "true" {
+		t.Fatalf("lease code label=%q", lease.Server.Labels["code"])
 	}
 	if readyTarget.Key == "" || readyTarget.TargetOS != targetLinux {
 		t.Fatalf("ready target=%#v", readyTarget)
@@ -232,6 +236,9 @@ func TestLinuxAcquireResolveReleaseLifecycle(t *testing.T) {
 	}
 	if resolved.SSH.TargetOS != targetLinux || resolved.SSH.User != "crabbox" || resolved.SSH.Host != "192.0.2.25" {
 		t.Fatalf("resolved SSH=%#v", resolved.SSH)
+	}
+	if resolved.Server.Labels["code"] != "true" {
+		t.Fatalf("resolved code label=%q", resolved.Server.Labels["code"])
 	}
 	if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: resolved}); err != nil {
 		t.Fatal(err)
