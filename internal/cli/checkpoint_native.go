@@ -237,16 +237,18 @@ func nativeCheckpointCreateDriver(cfg Config, server Server, target SSHTarget, s
 	return nil, false
 }
 
-func (a App) createNativeCheckpoint(ctx context.Context, cfg Config, server Server, target SSHTarget, leaseID, name, repoName, workdir, strategy string, noReboot, wait bool, waitTimeout time.Duration) (CoordinatorImage, map[string]string, error) {
+func (a App) createNativeCheckpoint(ctx context.Context, cfg Config, server Server, target SSHTarget, leaseID, name, repoName, workdir, artifactDir, strategy string, noReboot, wait bool, waitTimeout time.Duration) (CoordinatorImage, map[string]string, error) {
 	if provider, ok := nativeCheckpointLifecycleProvider(cfg, server); ok {
 		result, err := provider.CreateNativeCheckpoint(ctx, NativeCheckpointCreateRequest{
 			Config:      cfg,
+			Runtime:     runtimeForApp(a),
 			Server:      server,
 			Target:      target,
 			LeaseID:     leaseID,
 			Name:        name,
 			RepoName:    repoName,
 			Workdir:     workdir,
+			ArtifactDir: artifactDir,
 			Strategy:    strategy,
 			NoReboot:    noReboot,
 			Wait:        wait,
@@ -280,7 +282,7 @@ func (a App) createNativeCheckpoint(ctx context.Context, cfg Config, server Serv
 }
 
 func (a App) createAWSAMICheckpoint(ctx context.Context, cfg Config, target SSHTarget, leaseID, name, repoName string, noReboot, wait bool, waitTimeout time.Duration) (CoordinatorImage, error) {
-	image, _, err := a.createNativeCheckpoint(ctx, cfg, Server{Provider: "aws", CloudID: leaseID}, target, leaseID, name, repoName, "", checkpointStrategyImage, noReboot, wait, waitTimeout)
+	image, _, err := a.createNativeCheckpoint(ctx, cfg, Server{Provider: "aws", CloudID: leaseID}, target, leaseID, name, repoName, "", "", checkpointStrategyImage, noReboot, wait, waitTimeout)
 	return image, err
 }
 
@@ -430,6 +432,14 @@ func providerNativeCheckpointCapability(cfg Config, server Server, target SSHTar
 	})
 }
 
+func preferredAutoCheckpointKind(cfg Config, server Server, target SSHTarget, strategy string) (string, bool) {
+	capability, ok := providerNativeCheckpointCapability(cfg, server, target, strategy)
+	if !ok || !capability.PreferredForAuto || capability.Kind == "" {
+		return "", false
+	}
+	return capability.Kind, true
+}
+
 func (record checkpointRecord) nativeProvider() string {
 	return firstNonBlank(record.Native.Provider, checkpointProviderForKind(record.Kind), record.Provider)
 }
@@ -492,8 +502,11 @@ func nativeCheckpointDeleteID(record checkpointRecord) string {
 	return record.nativeDeleteID()
 }
 
-func nativeCheckpointResourceRequest(record checkpointRecord) NativeCheckpointResourceRequest {
+func nativeCheckpointResourceRequest(record checkpointRecord, artifactDir string, runtime Runtime) NativeCheckpointResourceRequest {
 	return NativeCheckpointResourceRequest{
+		Config:      Config{Provider: record.nativeProvider()},
+		Runtime:     runtime,
+		ArtifactDir: artifactDir,
 		Image: NativeCheckpointImage{
 			ID:         record.Native.ImageID,
 			Name:       record.Native.Name,
@@ -518,6 +531,8 @@ func checkpointKindForProviderImage(image CoordinatorImage) string {
 		return checkpointKindGCPDisk
 	case checkpointKindDockerCommit:
 		return checkpointKindDockerCommit
+	case checkpointKindHyperV:
+		return checkpointKindHyperV
 	}
 	switch image.Provider {
 	case "azure":
@@ -537,7 +552,7 @@ func checkpointStrategyForKind(kind string) string {
 	switch kind {
 	case checkpointKindAWSAMI, checkpointKindAzure, checkpointKindGCP, checkpointKindDockerCommit:
 		return checkpointStrategyImage
-	case checkpointKindAWSEBS, checkpointKindAzureOS, checkpointKindGCPDisk, checkpointKindParallels:
+	case checkpointKindAWSEBS, checkpointKindAzureOS, checkpointKindGCPDisk, checkpointKindParallels, checkpointKindHyperV:
 		return checkpointStrategyDiskSnapshot
 	default:
 		return ""
@@ -662,12 +677,13 @@ func nativeCoordinatorImageRef(record checkpointRecord) CoordinatorImageRef {
 	}
 }
 
-func nativeCheckpointForkRecord(record checkpointRecord) NativeCheckpointForkRecord {
+func nativeCheckpointForkRecord(record checkpointRecord, artifactDir string) NativeCheckpointForkRecord {
 	return NativeCheckpointForkRecord{
 		Kind:        record.Kind,
 		ImageID:     record.Native.ImageID,
 		Name:        record.Native.Name,
 		Resource:    record.Native.Resource,
+		ArtifactDir: artifactDir,
 		Region:      record.Native.Region,
 		Project:     record.Native.Project,
 		Direct:      record.Native.Direct,
@@ -688,7 +704,7 @@ func coordinatorStatusCode(err error) int {
 	return 0
 }
 
-func applyNativeCheckpointForkConfig(cfg *Config, fs *flag.FlagSet, record checkpointRecord) error {
+func applyNativeCheckpointForkConfig(cfg *Config, fs *flag.FlagSet, record checkpointRecord, artifactDir string) error {
 	cfg.Provider = record.nativeProvider()
 	if record.Native.Direct {
 		cfg.Coordinator = ""
@@ -723,7 +739,7 @@ func applyNativeCheckpointForkConfig(cfg *Config, fs *flag.FlagSet, record check
 	}
 	if err := forkProvider.ApplyNativeCheckpointForkConfig(NativeCheckpointForkRequest{
 		Config:              cfg,
-		Record:              nativeCheckpointForkRecord(record),
+		Record:              nativeCheckpointForkRecord(record, artifactDir),
 		MarketExplicit:      flagWasSet(fs, "market"),
 		AzureOSDisk:         azureOSDisk,
 		AzureOSDiskExplicit: azureOSDiskExplicit,
@@ -742,8 +758,8 @@ func applyNativeCheckpointForkConfig(cfg *Config, fs *flag.FlagSet, record check
 	return nil
 }
 
-func applyNativeCheckpointForkConfigAndFlags(cfg *Config, fs *flag.FlagSet, record checkpointRecord, providerFlags providerFlagValues) error {
-	if err := applyNativeCheckpointForkConfig(cfg, fs, record); err != nil {
+func applyNativeCheckpointForkConfigAndFlags(cfg *Config, fs *flag.FlagSet, record checkpointRecord, artifactDir string, providerFlags providerFlagValues) error {
+	if err := applyNativeCheckpointForkConfig(cfg, fs, record, artifactDir); err != nil {
 		return err
 	}
 	provider, err := ProviderFor(cfg.Provider)
@@ -758,5 +774,5 @@ func applyNativeCheckpointForkConfigAndFlags(cfg *Config, fs *flag.FlagSet, reco
 }
 
 func applyAWSAMICheckpointForkConfig(cfg *Config, fs *flag.FlagSet, record checkpointRecord) error {
-	return applyNativeCheckpointForkConfig(cfg, fs, record)
+	return applyNativeCheckpointForkConfig(cfg, fs, record, "")
 }
