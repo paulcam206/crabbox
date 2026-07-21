@@ -57,6 +57,20 @@ func TestLinuxAcquireDoesNotRequireGuestPassword(t *testing.T) {
 	}
 }
 
+func TestLinuxAcquireReportsIntegrationServiceImageContract(t *testing.T) {
+	oldOS := hypervHostOS
+	hypervHostOS = "windows"
+	t.Cleanup(func() { hypervHostOS = oldOS })
+
+	b := testBackend(&recordingRunner{})
+	b.cfg.TargetOS = targetLinux
+	b.cfg.HyperV.Image = ""
+	_, err := b.Acquire(context.Background(), core.AcquireRequest{})
+	if err == nil || !strings.Contains(err.Error(), "hv_kvp_daemon") || !strings.Contains(err.Error(), "cloud-init") {
+		t.Fatalf("Acquire error=%v", err)
+	}
+}
+
 func TestLinuxRejectsInitPassword(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
