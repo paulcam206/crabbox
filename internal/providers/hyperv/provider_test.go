@@ -97,6 +97,9 @@ func TestProviderSpecAndAliases(t *testing.T) {
 			{OS: core.TargetLinux},
 			{OS: core.TargetWindows, WindowsMode: core.WindowsModeNormal},
 		},
+		TargetFeatures: map[string]core.FeatureSet{
+			core.TargetLinux: providerCommonFeatures(),
+		},
 		Features: core.FeatureSet{
 			core.FeatureSSH,
 			core.FeatureCrabboxSync,
@@ -116,6 +119,38 @@ func TestProviderSpecAndAliases(t *testing.T) {
 	}
 	if aliases := p.Aliases(); aliases != nil {
 		t.Fatalf("Aliases()=%v want nil", aliases)
+	}
+}
+
+func TestProviderFeaturesAreTargetAware(t *testing.T) {
+	spec := (Provider{}).Spec()
+	linux := spec.FeaturesForTarget(core.TargetLinux, "")
+	windows := spec.FeaturesForTarget(core.TargetWindows, core.WindowsModeNormal)
+
+	for _, feature := range []core.Feature{
+		core.FeatureSSH,
+		core.FeatureCrabboxSync,
+		core.FeatureDesktop,
+		core.FeatureBrowser,
+		core.FeatureCleanup,
+		core.FeaturePauseResume,
+	} {
+		if !linux.Has(feature) || !windows.Has(feature) {
+			t.Fatalf("feature %s missing from linux=%v or windows=%v", feature, linux, windows)
+		}
+	}
+	for _, feature := range []core.Feature{
+		core.FeatureCheckpoint,
+		core.FeatureFork,
+		core.FeatureRestore,
+		core.FeatureSnapshot,
+	} {
+		if linux.Has(feature) {
+			t.Fatalf("linux unexpectedly advertises %s: %v", feature, linux)
+		}
+		if !windows.Has(feature) {
+			t.Fatalf("windows missing %s: %v", feature, windows)
+		}
 	}
 }
 
@@ -179,7 +214,7 @@ func TestConfigureAcceptsWindows(t *testing.T) {
 	}
 }
 
-func TestConfigureRejectsWindowsDesktopAndBrowser(t *testing.T) {
+func TestConfigureAcceptsWindowsDesktopAndBrowser(t *testing.T) {
 	for _, feature := range []string{"desktop", "browser"} {
 		t.Run(feature, func(t *testing.T) {
 			cfg := core.BaseConfig()
@@ -187,8 +222,8 @@ func TestConfigureRejectsWindowsDesktopAndBrowser(t *testing.T) {
 			cfg.TargetOS = core.TargetWindows
 			cfg.Desktop = feature == "desktop"
 			cfg.Browser = feature == "browser"
-			if _, err := (Provider{}).Configure(cfg, core.Runtime{}); err == nil || !strings.Contains(err.Error(), "only for target=linux") {
-				t.Fatalf("Configure error=%v", err)
+			if _, err := (Provider{}).Configure(cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: &recordingRunner{}}); err != nil {
+				t.Fatalf("Configure rejected Windows %s: %v", feature, err)
 			}
 		})
 	}

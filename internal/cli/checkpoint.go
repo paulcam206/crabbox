@@ -590,6 +590,9 @@ func (a App) checkpointRestore(ctx context.Context, args []string) error {
 	}
 	if record.Kind != checkpointKindArchive {
 		if isNativeCheckpointKind(record.Kind) {
+			if nativeCheckpointResourceID(record) == "" {
+				return exit(2, "checkpoint %s is pending; native provider resource is not recorded yet", record.ID)
+			}
 			if provider, providerErr := ProviderFor(record.nativeProvider()); providerErr == nil {
 				if restorer, ok := provider.(NativeCheckpointRestoreProvider); ok {
 					cfg, err := loadLeaseTargetConfig(fs, record.nativeProvider(), targetFlags, networkFlags, leaseTargetConfigOptions{LeaseID: *id})

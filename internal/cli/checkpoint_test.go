@@ -220,6 +220,33 @@ func TestCheckpointRestoreDryRunDoesNotResolveLease(t *testing.T) {
 	}
 }
 
+func TestCheckpointRestoreRejectsPendingNativeRecord(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+	store, err := defaultCheckpointStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending := checkpointRecord{
+		ID:        "chk_restore_pending_native",
+		Kind:      checkpointKindHyperV,
+		CreatedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+	pending.Native.Provider = "hyperv"
+	record, err := store.Create(pending)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = (App{Stdout: io.Discard, Stderr: io.Discard}).checkpointRestore(
+		context.Background(),
+		[]string{record.ID, "--id", "cbx_missing", "--dry-run"},
+	)
+	if err == nil || !strings.Contains(err.Error(), "native provider resource is not recorded yet") {
+		t.Fatalf("restore error=%v", err)
+	}
+}
+
 func TestCheckpointRestoreDryRunUsesStoredLeaseTarget(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))

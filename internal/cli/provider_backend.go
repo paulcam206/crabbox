@@ -392,12 +392,15 @@ type IdempotentLeaseIDBackend interface {
 }
 
 type ProviderSpec struct {
-	Name        string
-	Family      string
-	Kind        ProviderKind
-	Targets     []TargetSpec
-	Features    FeatureSet
-	Coordinator CoordinatorMode
+	Name     string
+	Family   string
+	Kind     ProviderKind
+	Targets  []TargetSpec
+	Features FeatureSet
+	// TargetFeatures overrides the provider-wide feature union for a target key
+	// such as "linux" or "windows/normal".
+	TargetFeatures map[string]FeatureSet
+	Coordinator    CoordinatorMode
 	// TailscaleEgressOnly marks FeatureTailscale as outbound userspace access,
 	// not a bidirectional peer endpoint.
 	TailscaleEgressOnly bool
@@ -458,6 +461,25 @@ func (s FeatureSet) Has(feature Feature) bool {
 		}
 	}
 	return false
+}
+
+func (s ProviderSpec) FeaturesForTarget(targetOS, windowsMode string) FeatureSet {
+	key := providerTargetKey(targetOS, windowsMode)
+	if features, ok := s.TargetFeatures[key]; ok {
+		return append(FeatureSet(nil), features...)
+	}
+	return append(FeatureSet(nil), s.Features...)
+}
+
+func providerTargetKey(targetOS, windowsMode string) string {
+	key := strings.TrimSpace(targetOS)
+	if key == "" {
+		return ""
+	}
+	if mode := strings.TrimSpace(windowsMode); mode != "" {
+		key += "/" + mode
+	}
+	return key
 }
 
 type Runtime struct {

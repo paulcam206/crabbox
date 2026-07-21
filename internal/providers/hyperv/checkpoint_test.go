@@ -32,6 +32,16 @@ func TestNativeCheckpointCapabilityPrefersProductionCheckpointForAuto(t *testing
 	}
 }
 
+func TestNativeCheckpointCapabilityRejectsLinux(t *testing.T) {
+	if capability, ok := (Provider{}).NativeCheckpointCapability(core.NativeCheckpointRequest{
+		Config:   core.Config{Provider: providerName, TargetOS: core.TargetLinux},
+		Target:   core.SSHTarget{TargetOS: core.TargetLinux},
+		Strategy: "auto",
+	}); ok {
+		t.Fatalf("Linux checkpoint capability=%#v want unsupported", capability)
+	}
+}
+
 func TestCreateNativeCheckpointExportsProductionMetadata(t *testing.T) {
 	setCheckpointTestState(t)
 	artifactDir := t.TempDir()
@@ -93,8 +103,14 @@ func TestCreateNativeCheckpointExportsProductionMetadata(t *testing.T) {
 		t.Fatalf("exported config: %v", err)
 	}
 	createScript := findScript(runner.calls, "Export-VMSnapshot")
-	if !strings.Contains(createScript, "-CheckpointType ProductionOnly") {
-		t.Fatalf("create script did not configure production-only checkpoints: %s", createScript)
+	for _, expected := range []string{
+		"-CheckpointType ProductionOnly",
+		"$_.Directory.Name -eq 'Virtual Machines'",
+		"$configs.Count -ne 1",
+	} {
+		if !strings.Contains(createScript, expected) {
+			t.Fatalf("create script missing %q: %s", expected, createScript)
+		}
 	}
 }
 
@@ -444,6 +460,45 @@ func TestForkNativeCheckpointCreatesFreshIdentityAndConnectsNetworkLast(t *testi
 		if !strings.Contains(rotationScript, expected) {
 			t.Fatalf("identity rotation missing %s: %s", expected, rotationScript)
 		}
+	}
+}
+
+func TestRemoveImportedCheckpointVMFindsPartialRegistrationByStorage(t *testing.T) {
+	setCheckpointTestState(t)
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	b := testBackend(runner)
+
+	if err := b.removeImportedCheckpointVM(context.Background(), "crabbox-partial-import"); err != nil {
+		t.Fatalf("removeImportedCheckpointVM: %v", err)
+	}
+	cleanupScript := findScript(runner.calls, "Get-CrabboxImportedVM")
+	for _, expected := range []string{
+		"ConfigurationLocation",
+		"SnapshotFileLocation",
+		"Get-VM -ErrorAction Stop",
+		"Get-VMHardDiskDrive -VM $candidate -ErrorAction Stop",
+		"partial checkpoint import cleanup left",
+	} {
+		if !strings.Contains(cleanupScript, expected) {
+			t.Fatalf("partial import cleanup script missing %q: %s", expected, cleanupScript)
+		}
+	}
+}
+
+func TestRemoveImportedCheckpointVMReportsUnverifiedCleanup(t *testing.T) {
+	setCheckpointTestState(t)
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	runner.respond = func(req core.LocalCommandRequest) (core.LocalCommandResult, error, bool) {
+		if strings.Contains(commandScript(req), "Get-CrabboxImportedVM") {
+			return core.LocalCommandResult{Stderr: "registered VM remains"}, errors.New("cleanup failed"), true
+		}
+		return core.LocalCommandResult{}, nil, false
+	}
+	b := testBackend(runner)
+
+	err := b.removeImportedCheckpointVM(context.Background(), "crabbox-partial-import")
+	if err == nil || !strings.Contains(err.Error(), "remove partial Hyper-V checkpoint import") {
+		t.Fatalf("cleanup error=%v", err)
 	}
 }
 
