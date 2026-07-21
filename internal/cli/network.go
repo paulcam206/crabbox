@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"flag"
 	"fmt"
@@ -531,6 +532,69 @@ func (a App) logoutRemoteTailscaleBestEffort(ctx context.Context, lease LeaseTar
 
 func LogoutTailscaleTarget(ctx context.Context, target SSHTarget) (string, error) {
 	return runSSHCombinedOutput(ctx, target, tailscaleLogoutScript(target))
+}
+
+func BootstrapTailscaleTarget(ctx context.Context, cfg Config, target SSHTarget) (string, error) {
+	if !cfg.Tailscale.Enabled {
+		return "", nil
+	}
+	remote, input, err := tailscaleSSHBootstrapPayload(cfg, target)
+	if err != nil {
+		return "", err
+	}
+	var stdout, stderr bytes.Buffer
+	if err := runSSHInput(ctx, target, remote, strings.NewReader(input), &stdout, &stderr); err != nil {
+		return strings.TrimSpace(stdout.String()), fmt.Errorf("bootstrap Tailscale over SSH: %w", err)
+	}
+	return strings.TrimSpace(stdout.String()), nil
+}
+
+func tailscaleSSHBootstrapPayload(cfg Config, target SSHTarget) (string, string, error) {
+	if !cfg.Tailscale.Enabled {
+		return "", "", nil
+	}
+	targetOS := strings.TrimSpace(target.TargetOS)
+	if targetOS == "" {
+		targetOS = strings.TrimSpace(cfg.TargetOS)
+	}
+	if targetOS != targetLinux {
+		return "", "", fmt.Errorf("direct Tailscale SSH bootstrap requires target=linux")
+	}
+	authKey := strings.TrimSpace(cfg.Tailscale.AuthKey)
+	if authKey == "" {
+		return "", "", fmt.Errorf("Tailscale auth key is required")
+	}
+	if strings.ContainsAny(authKey, "\r\n") {
+		return "", "", fmt.Errorf("Tailscale auth key must not contain newlines")
+	}
+
+	const authKeyMarker = "crabbox-tailscale-auth-key-from-stdin"
+	scriptCfg := cfg
+	scriptCfg.Tailscale.AuthKey = authKeyMarker
+	scriptCfg.Tailscale.ScrubCloudInitSecrets = false
+	bootstrap := cloudInitTailscaleBootstrap(scriptCfg)
+	assignment := "TS_AUTHKEY=" + shellQuote(authKeyMarker)
+	if !strings.Contains(bootstrap, assignment) {
+		return "", "", fmt.Errorf("build direct Tailscale bootstrap payload")
+	}
+	bootstrap = strings.Replace(bootstrap, assignment, `: "${TS_AUTHKEY:?}"`, 1)
+	if strings.Contains(bootstrap, authKeyMarker) {
+		return "", "", fmt.Errorf("direct Tailscale bootstrap payload retained its auth marker")
+	}
+	script := `set -euo pipefail
+retry() {
+  n=1
+  until "$@"; do
+    if [ "$n" -ge 8 ]; then
+      return 1
+    fi
+    sleep $((n * 5))
+    n=$((n + 1))
+  done
+}
+` + bootstrap + "\n"
+	remote := `sudo -n sh -c 'IFS= read -r TS_AUTHKEY; export TS_AUTHKEY; exec bash -s'`
+	return remote, authKey + "\n" + script, nil
 }
 
 func tailscaleLogoutScript(target SSHTarget) string {
