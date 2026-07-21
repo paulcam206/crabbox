@@ -27,9 +27,8 @@ func (b *backend) bootstrapWindowsTailscale(ctx context.Context, vmName, user st
 	}
 	scriptBlock := windowsTailscaleBootstrapPowerShell(cfg)
 	hostScript := fmt.Sprintf(
-		`$cred = New-Object PSCredential('%s', (ConvertTo-SecureString $env:_CRABBOX_GP -AsPlainText -Force)); `+
-			`Invoke-Command -VMName '%s' -Credential $cred -ArgumentList $env:_CRABBOX_TS_AUTHKEY -ScriptBlock { param([string]$authKey) %s }`,
-		escapePSString(user), escapePSString(vmName), scriptBlock,
+		`%sInvoke-Command -VMName '%s' -Credential $cred -ArgumentList $env:_CRABBOX_TS_AUTHKEY -ScriptBlock { param([string]$authKey) %s }`,
+		powershellCredentialPrelude(user), escapePSString(vmName), scriptBlock,
 	)
 	env := append(os.Environ(),
 		"_CRABBOX_GP="+b.guestPassword(),

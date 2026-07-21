@@ -91,9 +91,8 @@ func (b *backend) invokeInGuestCommandOnce(ctx context.Context, vmName, user, sc
 		argumentList = " -ArgumentList $env:_CRABBOX_GP"
 	}
 	script := fmt.Sprintf(
-		`$cred = New-Object PSCredential('%s', (ConvertTo-SecureString $env:_CRABBOX_GP -AsPlainText -Force)); `+
-			`Invoke-Command -VMName '%s' -Credential $cred%s -ScriptBlock { %s }`,
-		escapePSString(user), escapePSString(vmName), argumentList, scriptBlock,
+		`%sInvoke-Command -VMName '%s' -Credential $cred%s -ScriptBlock { %s }`,
+		powershellCredentialPrelude(user), escapePSString(vmName), argumentList, scriptBlock,
 	)
 	env := append(os.Environ(), "_CRABBOX_GP="+b.guestPassword())
 	result, err := b.invokeGuestScript(ctx, script, env, b.guestInvokeTimeout)

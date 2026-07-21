@@ -206,6 +206,7 @@ func TestCheckpointRestoreDryRunDoesNotResolveLease(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	record, err := store.Create(checkpointRecord{ID: "chk_restore_dryrun", Kind: checkpointKindArchive, CreatedAt: time.Now().UTC().Format(time.RFC3339), Workdir: "/work/cbx_old/my-app"})
 	if err != nil {
 		t.Fatal(err)
@@ -217,6 +218,23 @@ func TestCheckpointRestoreDryRunDoesNotResolveLease(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "would restore checkpoint") || !strings.Contains(stdout.String(), "cbx_missing") {
 		t.Fatalf("stdout=%q", stdout.String())
+	}
+}
+
+func TestCanonicalCheckpointRestoreLeaseIDResolvesSlug(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	const leaseID = "cbx_checkpoint_restore"
+	const slug = "checkpoint-source"
+	if err := claimLeaseForRepoProvider(leaseID, slug, "hyperv", t.TempDir(), time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := canonicalCheckpointRestoreLeaseID(slug, "hyperv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != leaseID {
+		t.Fatalf("canonical lease id = %q, want %q", got, leaseID)
 	}
 }
 

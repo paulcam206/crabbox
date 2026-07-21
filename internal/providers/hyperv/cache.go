@@ -343,12 +343,7 @@ func (b *backend) ensureHyperVCacheVolume(ctx context.Context, cfg Config, volum
 		return hypervCacheMetadata{}, exit(2, "create Hyper-V cache root %s: %v", b.cacheRoot, err)
 	}
 	sizeBytes := int64(sizeGB) * 1024 * 1024 * 1024
-	script := fmt.Sprintf(
-		`$ErrorActionPreference='Stop'; $vhd=New-VHD -Path '%s' -Dynamic -SizeBytes %d -ErrorAction Stop; `+
-			`[pscustomobject]@{DiskID=$vhd.DiskIdentifier.Guid.ToString()} | ConvertTo-Json -Compress`,
-		escapePSString(paths.vhd),
-		sizeBytes,
-	)
+	script := hypervCacheCreateScript(paths.vhd, sizeBytes)
 	result, runErr := b.powershell(ctx, script)
 	if runErr != nil {
 		_ = os.Remove(paths.vhd)
@@ -368,6 +363,19 @@ func (b *backend) ensureHyperVCacheVolume(ctx context.Context, cfg Config, volum
 		return hypervCacheMetadata{}, err
 	}
 	return expected, nil
+}
+
+func hypervCacheCreateScript(vhdPath string, sizeBytes int64) string {
+	return fmt.Sprintf(
+		`$ErrorActionPreference='Stop'; New-VHD -Path '%s' -Dynamic -SizeBytes %d -ErrorAction Stop | Out-Null; `+
+			`try { $disk=Mount-VHD -Path '%s' -NoDriveLetter -Passthru -ErrorAction Stop | Get-Disk -ErrorAction Stop; `+
+			`[pscustomobject]@{DiskID=[string]$disk.UniqueId} | ConvertTo-Json -Compress `+
+			`} finally { Dismount-VHD -Path '%s' -ErrorAction SilentlyContinue }`,
+		escapePSString(vhdPath),
+		sizeBytes,
+		escapePSString(vhdPath),
+		escapePSString(vhdPath),
+	)
 }
 
 func hypervCacheFormat(targetOS string) (string, string) {

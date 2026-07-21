@@ -1025,6 +1025,9 @@ func (b *backend) ForkNativeCheckpoint(ctx context.Context, req core.NativeCheck
 		if err := b.waitGuestReady(ctx, name, cfg.HyperV.User); err != nil {
 			return lease, fmt.Errorf("forked guest did not return after identity rotation: %w", err)
 		}
+		if err := b.injectSSHKey(ctx, name, cfg.HyperV.User, publicKey); err != nil {
+			return lease, fmt.Errorf("reapply forked Hyper-V guest SSH identity after reboot: %w", err)
+		}
 		if err := b.connectVMNetwork(ctx, name, cfg.HyperV.Switch); err != nil {
 			return lease, err
 		}
@@ -1118,6 +1121,7 @@ func (b *backend) rotateForkGuestIdentity(ctx context.Context, vmName, user, pub
 	identityScript := fmt.Sprintf(
 		`$ErrorActionPreference='Stop'; `+
 			`if ($env:COMPUTERNAME -ne '%s') { Rename-Computer -NewName '%s' -Force }; `+
+			`Set-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Cryptography' -Name MachineGuid -Value ([guid]::NewGuid().ToString()) -ErrorAction Stop; `+
 			`%s`+
 			`$vncPasswordPath='C:\ProgramData\crabbox\vnc.password'; `+
 			`$tightVNCServiceKey='HKLM:\Software\TightVNC\Server'; `+

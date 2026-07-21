@@ -764,9 +764,8 @@ func (b *backend) invokeGuestScript(ctx context.Context, script string, env []st
 // Direct readiness. Each probe is bounded because early boot calls can block.
 func (b *backend) waitGuestReady(ctx context.Context, vmName, user string) error {
 	script := fmt.Sprintf(
-		`$cred = New-Object PSCredential('%s', (ConvertTo-SecureString $env:_CRABBOX_GP -AsPlainText -Force)); `+
-			`Invoke-Command -VMName '%s' -Credential $cred -ScriptBlock { $true } -ErrorAction Stop | Out-Null`,
-		escapePSString(user), escapePSString(vmName),
+		`%sInvoke-Command -VMName '%s' -Credential $cred -ScriptBlock { $true } -ErrorAction Stop | Out-Null`,
+		powershellCredentialPrelude(user), escapePSString(vmName),
 	)
 	env := append(os.Environ(), "_CRABBOX_GP="+b.guestPassword())
 	// Include attempts and backoff in the overall boot budget.
@@ -800,9 +799,8 @@ func (b *backend) waitGuestReady(ctx context.Context, vmName, user string) error
 // _CRABBOX_GP, never the command line.
 func (b *backend) invokeInGuest(ctx context.Context, vmName, user, scriptBlock, label string) error {
 	script := fmt.Sprintf(
-		`$cred = New-Object PSCredential('%s', (ConvertTo-SecureString $env:_CRABBOX_GP -AsPlainText -Force)); `+
-			`Invoke-Command -VMName '%s' -Credential $cred -ScriptBlock { %s }`,
-		escapePSString(user), escapePSString(vmName), scriptBlock,
+		`%sInvoke-Command -VMName '%s' -Credential $cred -ScriptBlock { %s }`,
+		powershellCredentialPrelude(user), escapePSString(vmName), scriptBlock,
 	)
 	env := append(os.Environ(), "_CRABBOX_GP="+b.guestPassword())
 	var lastErr error
@@ -1673,6 +1671,16 @@ func isIPv4(s string) bool {
 
 func escapePSString(s string) string {
 	return strings.ReplaceAll(s, "'", "''")
+}
+
+func powershellCredentialPrelude(user string) string {
+	return fmt.Sprintf(
+		`$secure = [System.Security.SecureString]::new(); `+
+			`foreach ($character in ([string]$env:_CRABBOX_GP).ToCharArray()) { $secure.AppendChar($character) }; `+
+			`$secure.MakeReadOnly(); `+
+			`$cred = [System.Management.Automation.PSCredential]::new('%s', $secure); `,
+		escapePSString(user),
+	)
 }
 
 func commandError(action string, result LocalCommandResult, err error) error {

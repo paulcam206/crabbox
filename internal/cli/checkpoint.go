@@ -605,8 +605,12 @@ func (a App) checkpointRestore(ctx context.Context, args []string) error {
 					if err := requireLeaseID(*id, "crabbox checkpoint restore <checkpoint-id> --id <lease-id>", cfg); err != nil {
 						return err
 					}
+					leaseID, err := canonicalCheckpointRestoreLeaseID(*id, record.nativeProvider())
+					if err != nil {
+						return err
+					}
 					if *dryRun {
-						fmt.Fprintf(a.Stdout, "would restore checkpoint id=%s lease=%s snapshot=%s\n", record.ID, *id, record.Native.ImageID)
+						fmt.Fprintf(a.Stdout, "would restore checkpoint id=%s lease=%s snapshot=%s\n", record.ID, leaseID, record.Native.ImageID)
 						return nil
 					}
 					repo, err := findRepo()
@@ -617,7 +621,7 @@ func (a App) checkpointRestore(ctx context.Context, args []string) error {
 						Config:  cfg,
 						Runtime: runtimeForApp(a),
 						Record:  nativeCheckpointForkRecord(record, paths.Dir),
-						LeaseID: strings.TrimSpace(*id),
+						LeaseID: leaseID,
 						Repo:    repo,
 						Reclaim: *reclaim,
 					})
@@ -627,6 +631,7 @@ func (a App) checkpointRestore(ctx context.Context, args []string) error {
 					fmt.Fprintf(a.Stdout, "checkpoint restored id=%s lease=%s snapshot=%s\n", record.ID, result.Lease.LeaseID, record.Native.ImageID)
 					return nil
 				}
+
 			}
 			if record.Kind == checkpointKindParallels {
 				cfg, err := loadLeaseTargetConfig(fs, *provider, targetFlags, networkFlags, leaseTargetConfigOptions{LeaseID: *id})
@@ -699,6 +704,18 @@ func (a App) checkpointRestore(ctx context.Context, args []string) error {
 	}
 	fmt.Fprintf(a.Stdout, "checkpoint restored id=%s lease=%s workdir=%s\n", record.ID, leaseID, workdir)
 	return nil
+}
+
+func canonicalCheckpointRestoreLeaseID(identifier, provider string) (string, error) {
+	identifier = strings.TrimSpace(identifier)
+	claim, found, err := resolveLeaseClaimForProvider(identifier, provider)
+	if err != nil {
+		return "", err
+	}
+	if found && strings.TrimSpace(claim.LeaseID) != "" {
+		return strings.TrimSpace(claim.LeaseID), nil
+	}
+	return identifier, nil
 }
 
 func (a App) checkpointFork(ctx context.Context, args []string) (err error) {
