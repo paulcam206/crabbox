@@ -37,20 +37,23 @@ func (b *backend) createNoCloudSeed(ctx context.Context, path, userData, metaDat
 		`$ErrorActionPreference = 'Stop'; `+
 			`$path = '%s'; `+
 			`New-VHD -Path $path -Dynamic -SizeBytes %d -ErrorAction Stop | Out-Null; `+
-			`$disk = Mount-VHD -Path $path -Passthru | Get-Disk; `+
+			`$mounted = $false; `+
 			`try { `+
+			`$vhd = Mount-VHD -Path $path -Passthru -ErrorAction Stop; `+
+			`$mounted = $true; `+
+			`$disk = $vhd | Get-Disk -ErrorAction Stop; `+
 			`if ($disk.IsOffline) { Set-Disk -Number $disk.Number -IsOffline $false }; `+
 			`if ($disk.IsReadOnly) { Set-Disk -Number $disk.Number -IsReadOnly $false }; `+
 			`Initialize-Disk -Number $disk.Number -PartitionStyle MBR -ErrorAction Stop | Out-Null; `+
 			`$partition = New-Partition -DiskNumber $disk.Number -UseMaximumSize -AssignDriveLetter -ErrorAction Stop; `+
-			`Format-Volume -Partition $partition -FileSystem FAT -NewFileSystemLabel 'cidata' -Confirm:$false -Force -ErrorAction Stop | Out-Null; `+
+			`$partition | Format-Volume -FileSystem FAT -NewFileSystemLabel 'cidata' -Confirm:$false -Force -ErrorAction Stop | Out-Null; `+
 			`$root = "$($partition.DriveLetter):\"; `+
 			`$utf8 = New-Object System.Text.UTF8Encoding($false); `+
 			`$userData = [System.IO.File]::ReadAllText($env:_CRABBOX_USER_DATA_PATH); `+
 			`$metaData = [System.IO.File]::ReadAllText($env:_CRABBOX_META_DATA_PATH); `+
 			`[System.IO.File]::WriteAllText((Join-Path $root 'user-data'), $userData, $utf8); `+
 			`[System.IO.File]::WriteAllText((Join-Path $root 'meta-data'), $metaData, $utf8) `+
-			`} finally { Dismount-VHD -Path $path -ErrorAction SilentlyContinue }`,
+			`} finally { if ($mounted) { Dismount-VHD -Path $path -ErrorAction SilentlyContinue } }`,
 		escapePSString(path), cloudInitSeedSizeBytes,
 	)
 	env := append(os.Environ(),
