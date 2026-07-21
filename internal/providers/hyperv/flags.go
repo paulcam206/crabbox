@@ -20,7 +20,7 @@ type flagValues struct {
 
 func registerFlags(fs *flag.FlagSet, defaults core.Config) any {
 	return flagValues{
-		Image:        fs.String("hyperv-image", defaults.HyperV.Image, "generalized guest VHDX template path for Hyper-V VM creation"),
+		Image:        fs.String("hyperv-image", defaults.HyperV.Image, "guest VHDX template path for Hyper-V VM creation"),
 		User:         fs.String("hyperv-user", defaults.HyperV.User, "guest account for SSH"),
 		WorkRoot:     fs.String("hyperv-work-root", defaults.HyperV.WorkRoot, "Crabbox work root inside the guest"),
 		SecureBoot:   fs.String("hyperv-secure-boot", defaults.HyperV.SecureBoot, "secure boot mode: auto, windows, linux, or off"),

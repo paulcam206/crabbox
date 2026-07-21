@@ -9,7 +9,7 @@ Family: `local-vm`
 
 The Hyper-V provider creates and manages Linux or Windows virtual machines on a
 local Windows host using Microsoft Hyper-V. VMs are provisioned as Generation 2
-VMs from a generalized VHDX template, connected to a configurable virtual
+VMs from a target-appropriate VHDX template, connected to a configurable virtual
 switch (default: "Default Switch"), and accessed over SSH.
 
 Hyper-V must be enabled on the host (`Enable-WindowsOptionalFeature -Online
@@ -128,7 +128,7 @@ DHCP and internet access until `crabbox-ready` succeeds.
 
 | Flag | Default | Description |
 | --- | --- | --- |
-| `--hyperv-image` | (none) | Path to the generalized guest VHDX template (required) |
+| `--hyperv-image` | (none) | Path to the guest VHDX template (required) |
 | `--hyperv-user` | `crabbox` | Guest account for SSH; letters, digits, `.`, `_`, and `-` only |
 | `--hyperv-work-root` | target-specific | `C:\crabbox` for Windows or `/work/crabbox` for Linux |
 | `--hyperv-cpu` | `4` | Number of virtual CPUs |
