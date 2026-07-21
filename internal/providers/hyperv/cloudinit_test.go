@@ -100,6 +100,15 @@ func TestCreateNoCloudSeedUsesCidataAndCoreCloudInit(t *testing.T) {
 	if strings.Contains(script, publicKey) || strings.Contains(script, "#cloud-config") {
 		t.Fatal("NoCloud payload must not be embedded in the PowerShell command line")
 	}
+	if strings.Contains(script, "Format-Volume -Partition") || !strings.Contains(script, "$partition | Format-Volume") {
+		t.Fatalf("seed script does not bind the partition through the pipeline: %q", script)
+	}
+	tryIndex := strings.Index(script, "try {")
+	mountIndex := strings.Index(script, "Mount-VHD")
+	finallyIndex := strings.Index(script, "} finally {")
+	if tryIndex < 0 || mountIndex < tryIndex || finallyIndex < mountIndex || !strings.Contains(script[finallyIndex:], "Dismount-VHD") {
+		t.Fatalf("seed script does not guarantee dismount after mount: %q", script)
+	}
 	for _, path := range sourcePaths {
 		if _, err := os.Stat(path); !os.IsNotExist(err) {
 			t.Errorf("temporary NoCloud source remains at %s: %v", path, err)
