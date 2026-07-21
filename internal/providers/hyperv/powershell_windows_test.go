@@ -12,12 +12,12 @@ import (
 )
 
 func TestPowerShellCredentialPreludeDoesNotRequireSecurityModule(t *testing.T) {
-	const password = "module-independent-password"
+	plainText := strings.Repeat("x", 27)
 	script := powershellCredentialPrelude("crabbox") +
 		`Write-Output $cred.UserName; Write-Output $cred.Password.Length`
 
 	command := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script)
-	command.Env = append(os.Environ(), "PSModulePath=", "_CRABBOX_GP="+password)
+	command.Env = append(os.Environ(), "PSModulePath=", "_CRABBOX_GP="+plainText)
 	output, err := command.CombinedOutput()
 	if err != nil {
 		t.Fatalf("PowerShell credential construction failed without PSModulePath: %v\n%s", err, output)
