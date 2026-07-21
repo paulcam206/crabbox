@@ -31,6 +31,7 @@ const (
 	checkpointKindGCPDisk      = "gcp-disk-snapshot"
 	checkpointKindParallels    = "parallels-snapshot"
 	checkpointKindDockerCommit = "docker-commit"
+	checkpointKindHyperV       = "hyperv-checkpoint"
 
 	checkpointStrategyAuto         = "auto"
 	checkpointStrategyImage        = "image"
@@ -147,7 +148,7 @@ func (a App) checkpointCreate(ctx context.Context, args []string) (err error) {
 	}
 	createKind := checkpointCreateMode(*mode, *strategy, cfg, server, target, *recipeOnly)
 	switch createKind {
-	case checkpointKindRecipe, checkpointKindAWSAMI, checkpointKindAWSEBS, checkpointKindAzure, checkpointKindAzureOS, checkpointKindGCP, checkpointKindGCPDisk, checkpointKindParallels, checkpointKindDockerCommit, checkpointKindArchive:
+	case checkpointKindRecipe, checkpointKindAWSAMI, checkpointKindAWSEBS, checkpointKindAzure, checkpointKindAzureOS, checkpointKindGCP, checkpointKindGCPDisk, checkpointKindParallels, checkpointKindDockerCommit, checkpointKindHyperV, checkpointKindArchive:
 		record.Kind = createKind
 	default:
 		return exit(2, "checkpoint mode must be auto, native, or archive")
@@ -164,8 +165,8 @@ func (a App) checkpointCreate(ctx context.Context, args []string) (err error) {
 	}()
 	switch createKind {
 	case checkpointKindRecipe:
-	case checkpointKindAWSAMI, checkpointKindAWSEBS, checkpointKindAzure, checkpointKindAzureOS, checkpointKindGCP, checkpointKindGCPDisk, checkpointKindParallels, checkpointKindDockerCommit:
-		image, metadata, err := a.createNativeCheckpoint(ctx, cfg, server, target, leaseID, record.Name, repo.Name, workdir, checkpointStrategyForKind(createKind), *noReboot, *wait, *waitTimeout)
+	case checkpointKindAWSAMI, checkpointKindAWSEBS, checkpointKindAzure, checkpointKindAzureOS, checkpointKindGCP, checkpointKindGCPDisk, checkpointKindParallels, checkpointKindDockerCommit, checkpointKindHyperV:
+		image, metadata, err := a.createNativeCheckpoint(ctx, cfg, server, target, leaseID, record.Name, repo.Name, workdir, paths.Dir, checkpointStrategyForKind(createKind), *noReboot, *wait, *waitTimeout)
 		if image.ID != "" {
 			applyNativeImageCheckpointRecord(&record, image, *noReboot)
 			record.Native.Metadata = metadata
@@ -589,6 +590,41 @@ func (a App) checkpointRestore(ctx context.Context, args []string) error {
 	}
 	if record.Kind != checkpointKindArchive {
 		if isNativeCheckpointKind(record.Kind) {
+			if provider, providerErr := ProviderFor(record.nativeProvider()); providerErr == nil {
+				if restorer, ok := provider.(NativeCheckpointRestoreProvider); ok {
+					cfg, err := loadLeaseTargetConfig(fs, record.nativeProvider(), targetFlags, networkFlags, leaseTargetConfigOptions{LeaseID: *id})
+					if err != nil {
+						return err
+					}
+					if err := applyProviderFlags(&cfg, fs, providerFlags); err != nil {
+						return err
+					}
+					if err := requireLeaseID(*id, "crabbox checkpoint restore <checkpoint-id> --id <lease-id>", cfg); err != nil {
+						return err
+					}
+					if *dryRun {
+						fmt.Fprintf(a.Stdout, "would restore checkpoint id=%s lease=%s snapshot=%s\n", record.ID, *id, record.Native.ImageID)
+						return nil
+					}
+					repo, err := findRepo()
+					if err != nil {
+						return err
+					}
+					result, err := restorer.RestoreNativeCheckpoint(ctx, NativeCheckpointRestoreRequest{
+						Config:  cfg,
+						Runtime: runtimeForApp(a),
+						Record:  nativeCheckpointForkRecord(record, paths.Dir),
+						LeaseID: strings.TrimSpace(*id),
+						Repo:    repo,
+						Reclaim: *reclaim,
+					})
+					if err != nil {
+						return err
+					}
+					fmt.Fprintf(a.Stdout, "checkpoint restored id=%s lease=%s snapshot=%s\n", record.ID, result.Lease.LeaseID, record.Native.ImageID)
+					return nil
+				}
+			}
 			if record.Kind == checkpointKindParallels {
 				cfg, err := loadLeaseTargetConfig(fs, *provider, targetFlags, networkFlags, leaseTargetConfigOptions{LeaseID: *id})
 				if err != nil {
@@ -723,7 +759,7 @@ func (a App) checkpointFork(ctx context.Context, args []string) (err error) {
 		if nativeCheckpointResourceID(record) == "" {
 			return exit(2, "checkpoint %s is pending; native provider resource is not recorded yet", record.ID)
 		}
-		if err := applyNativeCheckpointForkConfigAndFlags(&cfg, fs, record, leaseFlags.ProviderFlags); err != nil {
+		if err := applyNativeCheckpointForkConfigAndFlags(&cfg, fs, record, paths.Dir, leaseFlags.ProviderFlags); err != nil {
 			return err
 		}
 	}
@@ -832,6 +868,27 @@ type checkpointForkProvision struct {
 }
 
 func (a App) provisionCheckpointFork(ctx context.Context, cfg Config, backend Backend, sshBackend SSHLeaseBackend, repo Repo, record checkpointRecord, paths checkpointPaths, keep, reclaim bool, requestedSlug, workdirOverride string, clear bool) (checkpointForkProvision, error) {
+	if isNativeCheckpointKind(record.Kind) {
+		if provider, ok := backend.(NativeCheckpointForkLifecycleProvider); ok {
+			lease, err := provider.ForkNativeCheckpoint(ctx, NativeCheckpointForkLifecycleRequest{
+				Record:        nativeCheckpointForkRecord(record, paths.Dir),
+				Repo:          repo,
+				Keep:          keep,
+				Reclaim:       reclaim,
+				RequestedSlug: requestedSlug,
+			})
+			if err != nil {
+				return checkpointForkProvision{}, err
+			}
+			var releaseOnce sync.Once
+			release := func(releaseCtx context.Context) {
+				releaseOnce.Do(func() {
+					a.releaseBackendLeaseBestEffort(releaseCtx, sshBackend, cfg, lease)
+				})
+			}
+			return checkpointForkProvision{Lease: lease, Release: release}, nil
+		}
+	}
 	lease, err := sshBackend.Acquire(ctx, AcquireRequest{Repo: repo, Options: leaseOptionsFromConfig(cfg), Keep: keep, Reclaim: reclaim, RequestedSlug: requestedSlug})
 	if err != nil {
 		return checkpointForkProvision{}, err
@@ -1122,22 +1179,22 @@ func (a App) checkpointDelete(ctx context.Context, args []string) error {
 		fmt.Fprintf(a.Stdout, "would delete checkpoint id=%s kind=%s provider=%s resource=%s local_only=%t\n", record.ID, record.Kind, blank(record.Provider, "-"), blank(nativeCheckpointDeleteID(record), "-"), *localOnly)
 		return nil
 	}
-	if err := deleteCheckpoint(ctx, store, id, *localOnly); err != nil {
+	if err := deleteCheckpoint(ctx, store, id, *localOnly, runtimeForApp(a)); err != nil {
 		return err
 	}
 	fmt.Fprintf(a.Stdout, "checkpoint deleted id=%s\n", id)
 	return nil
 }
 
-func deleteCheckpoint(ctx context.Context, store checkpointStore, id string, localOnly bool) error {
-	record, _, err := store.Read(id)
+func deleteCheckpoint(ctx context.Context, store checkpointStore, id string, localOnly bool, runtime Runtime) error {
+	record, paths, err := store.Read(id)
 	if err != nil {
 		return err
 	}
 	providerID := nativeCheckpointDeleteID(record)
 	if isNativeCheckpointKind(record.Kind) && providerID != "" && !localOnly {
 		if provider, ok := nativeCheckpointLifecycleProvider(Config{Provider: record.nativeProvider()}, Server{}); ok {
-			if err := provider.DeleteNativeCheckpoint(ctx, nativeCheckpointResourceRequest(record)); err != nil {
+			if err := provider.DeleteNativeCheckpoint(ctx, nativeCheckpointResourceRequest(record, paths.Dir, runtime)); err != nil {
 				return err
 			}
 			return store.Delete(id)
@@ -1241,7 +1298,7 @@ func (a App) checkpointPrune(ctx context.Context, args []string) error {
 			fmt.Fprintf(a.Stdout, "would delete id=%s kind=%s created=%s\n", record.ID, record.Kind, record.CreatedAt)
 			continue
 		}
-		if err := deleteCheckpoint(ctx, store, record.ID, *localOnly); err != nil {
+		if err := deleteCheckpoint(ctx, store, record.ID, *localOnly, runtimeForApp(a)); err != nil {
 			return err
 		}
 		fmt.Fprintf(a.Stdout, "checkpoint pruned id=%s kind=%s created=%s\n", record.ID, record.Kind, record.CreatedAt)
@@ -1348,7 +1405,7 @@ func (a App) verifyCheckpointRecord(ctx context.Context, store checkpointStore, 
 			return verifyDirectAzureCheckpoint(ctx, audit, cfg, providerID), nil
 		}
 		if provider, ok := nativeCheckpointLifecycleProvider(Config{Provider: record.nativeProvider()}, Server{}); ok {
-			result, err := provider.VerifyNativeCheckpoint(ctx, nativeCheckpointResourceRequest(record))
+			result, err := provider.VerifyNativeCheckpoint(ctx, nativeCheckpointResourceRequest(record, paths.Dir, runtimeForApp(a)))
 			if err != nil {
 				audit.ProviderState = "unknown"
 				audit.NextAction = "check_runtime"
@@ -1480,6 +1537,9 @@ func checkpointCreateMode(mode, strategy string, cfg Config, server Server, targ
 	}
 	switch strings.ToLower(strings.TrimSpace(mode)) {
 	case "", "auto":
+		if kind, ok := preferredAutoCheckpointKind(cfg, server, target, strategy); ok {
+			return kind
+		}
 		if kind, ok := nativeCheckpointKind(cfg, server, target, strategy); ok {
 			return kind
 		}
@@ -1588,7 +1648,7 @@ func nativeCheckpointForkWorkdir(cfg Config, leaseID, repoName, override string)
 }
 
 func isNativeCheckpointKind(kind string) bool {
-	return kind == checkpointKindAWSAMI || kind == checkpointKindAWSEBS || kind == checkpointKindAzure || kind == checkpointKindAzureOS || kind == checkpointKindGCP || kind == checkpointKindGCPDisk || kind == checkpointKindParallels || kind == checkpointKindDockerCommit
+	return kind == checkpointKindAWSAMI || kind == checkpointKindAWSEBS || kind == checkpointKindAzure || kind == checkpointKindAzureOS || kind == checkpointKindGCP || kind == checkpointKindGCPDisk || kind == checkpointKindParallels || kind == checkpointKindDockerCommit || kind == checkpointKindHyperV
 }
 
 func checkpointProviderForKind(kind string) string {
@@ -1603,6 +1663,8 @@ func checkpointProviderForKind(kind string) string {
 		return "parallels"
 	case checkpointKindDockerCommit:
 		return "local-container"
+	case checkpointKindHyperV:
+		return "hyperv"
 	default:
 		return ""
 	}

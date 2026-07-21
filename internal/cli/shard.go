@@ -186,7 +186,7 @@ func (a App) shard(ctx context.Context, args []string) error {
 		if nativeCheckpointResourceID(record) == "" {
 			return exit(2, "checkpoint %s is pending; native provider resource is not recorded yet", record.ID)
 		}
-		if err := applyNativeCheckpointForkConfigAndFlags(&cfg, fs, record, leaseFlags.ProviderFlags); err != nil {
+		if err := applyNativeCheckpointForkConfigAndFlags(&cfg, fs, record, paths.Dir, leaseFlags.ProviderFlags); err != nil {
 			return err
 		}
 	}
