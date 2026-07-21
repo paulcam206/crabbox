@@ -351,8 +351,9 @@ func (b *backend) createNativeCheckpoint(ctx context.Context, req core.NativeChe
 			`try { `+
 			`$snapshot=Checkpoint-VM -VM $vm -SnapshotName '%s' -Passthru -ErrorAction Stop; `+
 			`Export-VMSnapshot -VMSnapshot $snapshot -Path '%s' -ErrorAction Stop; `+
-			`$config=Get-ChildItem -LiteralPath '%s' -Filter '*.vmcx' -File -Recurse | Select-Object -First 1; `+
-			`if (-not $config) { throw 'Export-VMSnapshot did not produce a .vmcx configuration' }; `+
+			`$configs=@(Get-ChildItem -LiteralPath '%s' -Filter '*.vmcx' -File -Recurse | Where-Object { $_.Directory.Name -eq 'Virtual Machines' }); `+
+			`if ($configs.Count -ne 1) { throw "Export-VMSnapshot produced $($configs.Count) importable .vmcx configurations; expected exactly one" }; `+
+			`$config=$configs[0]; `+
 			`[pscustomobject]@{SourceVMID=$vm.Id.Guid;SnapshotID=$snapshot.Id.Guid;SnapshotName=$snapshot.Name;ExportedConfig=$config.FullName} | ConvertTo-Json -Compress `+
 			`} catch { if ($snapshot) { Remove-VMSnapshot -VMSnapshot $snapshot -Confirm:$false -ErrorAction SilentlyContinue }; throw }`,
 		escapePSString(sourceName),
@@ -373,7 +374,9 @@ func (b *backend) createNativeCheckpoint(ctx context.Context, req core.NativeChe
 	if !strings.EqualFold(output.SourceVMID, source.ID) || output.SnapshotID == "" || output.SnapshotName != checkpointName {
 		return result, exit(2, "Hyper-V checkpoint export returned inconsistent source or snapshot identity")
 	}
-	if !pathWithin(paths.exportRoot, output.ExportedConfig) || !strings.EqualFold(filepath.Ext(output.ExportedConfig), ".vmcx") {
+	if !pathWithin(paths.exportRoot, output.ExportedConfig) ||
+		!strings.EqualFold(filepath.Ext(output.ExportedConfig), ".vmcx") ||
+		!strings.EqualFold(filepath.Base(filepath.Dir(output.ExportedConfig)), "Virtual Machines") {
 		return result, exit(2, "Hyper-V checkpoint export returned unowned configuration %q", output.ExportedConfig)
 	}
 	if _, err := os.Stat(output.ExportedConfig); err != nil {
@@ -861,6 +864,9 @@ func (b *backend) restartVM(ctx context.Context, name string) error {
 
 func (b *backend) removeImportedCheckpointVM(ctx context.Context, name string) error {
 	var errs []error
+	if err := b.removeImportedCheckpointRegistration(ctx, name); err != nil {
+		errs = append(errs, err)
+	}
 	if err := b.removeVM(ctx, name); err != nil {
 		errs = append(errs, err)
 	}
@@ -868,6 +874,38 @@ func (b *backend) removeImportedCheckpointVM(ctx context.Context, name string) e
 		errs = append(errs, err)
 	}
 	return errors.Join(errs...)
+}
+
+func (b *backend) removeImportedCheckpointRegistration(ctx context.Context, name string) error {
+	vmRoot := filepath.Join(hypervVMDir(), name)
+	vhdRoot := filepath.Join(hypervVHDDir(), name)
+	script := fmt.Sprintf(
+		`$ErrorActionPreference='Stop'; `+
+			`$name='%s'; `+
+			`$roots=@('%s','%s') | ForEach-Object { [IO.Path]::GetFullPath($_).TrimEnd('\') }; `+
+			`function Test-CrabboxOwnedPath([string]$path) { `+
+			`if ([string]::IsNullOrWhiteSpace($path)) { return $false }; `+
+			`$full=[IO.Path]::GetFullPath($path).TrimEnd('\'); `+
+			`foreach ($root in $roots) { if ($full.Equals($root,[StringComparison]::OrdinalIgnoreCase) -or $full.StartsWith($root+'\',[StringComparison]::OrdinalIgnoreCase)) { return $true } }; `+
+			`return $false }; `+
+			`function Get-CrabboxImportedVM { `+
+			`@(Get-VM -ErrorAction Stop | Where-Object { `+
+			`$candidate=$_; $owned=$candidate.Name -eq $name; `+
+			`if (-not $owned) { $owned=(Test-CrabboxOwnedPath $candidate.ConfigurationLocation) -or (Test-CrabboxOwnedPath $candidate.SnapshotFileLocation) }; `+
+			`if (-not $owned) { foreach ($disk in @(Get-VMHardDiskDrive -VM $candidate -ErrorAction Stop)) { if (Test-CrabboxOwnedPath $disk.Path) { $owned=$true; break } } }; `+
+			`$owned }) }; `+
+			`foreach ($candidate in @(Get-CrabboxImportedVM)) { Stop-VM -VM $candidate -Force -Confirm:$false -ErrorAction SilentlyContinue; Remove-VM -VM $candidate -Force -Confirm:$false -ErrorAction Stop }; `+
+			`$remaining=@(Get-CrabboxImportedVM); `+
+			`if ($remaining.Count -ne 0) { throw "partial checkpoint import cleanup left $($remaining.Count) registered VM(s)" }`,
+		escapePSString(name),
+		escapePSString(vmRoot),
+		escapePSString(vhdRoot),
+	)
+	result, err := b.powershell(ctx, script)
+	if err != nil {
+		return commandError("remove partial Hyper-V checkpoint import", result, err)
+	}
+	return nil
 }
 
 func forkGuestHostname(leaseID string) string {

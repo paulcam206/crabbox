@@ -18,11 +18,14 @@ func (Provider) Aliases() []string { return nil }
 
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
-		Name:        providerName,
-		Family:      "local-vm",
-		Kind:        core.ProviderKindSSHLease,
-		Targets:     providerTargets(),
-		Features:    providerFeatures(),
+		Name:     providerName,
+		Family:   "local-vm",
+		Kind:     core.ProviderKindSSHLease,
+		Targets:  providerTargets(),
+		Features: providerFeatures(),
+		TargetFeatures: map[string]core.FeatureSet{
+			core.TargetLinux: providerCommonFeatures(),
+		},
 		Coordinator: core.CoordinatorNever,
 	}
 }
@@ -34,7 +37,7 @@ func providerTargets() []core.TargetSpec {
 	}
 }
 
-func providerFeatures() core.FeatureSet {
+func providerCommonFeatures() core.FeatureSet {
 	return core.FeatureSet{
 		core.FeatureSSH,
 		core.FeatureCrabboxSync,
@@ -42,11 +45,16 @@ func providerFeatures() core.FeatureSet {
 		core.FeatureBrowser,
 		core.FeatureCleanup,
 		core.FeaturePauseResume,
+	}
+}
+
+func providerFeatures() core.FeatureSet {
+	return append(providerCommonFeatures(),
 		core.FeatureCheckpoint,
 		core.FeatureFork,
 		core.FeatureRestore,
 		core.FeatureSnapshot,
-	}
+	)
 }
 
 func (Provider) RegisterFlags(fs *flag.FlagSet, defaults core.Config) any {
@@ -67,9 +75,6 @@ func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, err
 	}
 	if targetOS == core.TargetWindows && cfg.WindowsMode != "" && cfg.WindowsMode != core.WindowsModeNormal {
 		return nil, core.Exit(2, "provider=%s supports windows.mode=normal only", providerName)
-	}
-	if targetOS == core.TargetWindows && (cfg.Desktop || cfg.Browser) {
-		return nil, core.Exit(2, "provider=%s desktop and browser features are supported only for target=linux", providerName)
 	}
 	if targetOS == core.TargetLinux && cfg.HyperV.InitPassword {
 		return nil, core.Exit(2, "--hyperv-init-password is supported only for target=windows")
