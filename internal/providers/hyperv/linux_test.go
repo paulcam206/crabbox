@@ -55,6 +55,34 @@ func TestLinuxRejectsInitPassword(t *testing.T) {
 	}
 }
 
+func TestValidLinuxSSHUser(t *testing.T) {
+	for _, user := range []string{"crabbox", "_service", "user-1", "a"} {
+		if !validLinuxSSHUser(user) {
+			t.Errorf("validLinuxSSHUser(%q)=false", user)
+		}
+	}
+	for _, user := range []string{"", "-guest", "Guest", "user.name", "user name", strings.Repeat("a", 33)} {
+		if validLinuxSSHUser(user) {
+			t.Errorf("validLinuxSSHUser(%q)=true", user)
+		}
+	}
+}
+
+func TestLinuxAcquireRejectsInvalidUserBeforeProvisioning(t *testing.T) {
+	oldOS := hypervHostOS
+	hypervHostOS = "windows"
+	t.Cleanup(func() { hypervHostOS = oldOS })
+
+	b := testBackend(&recordingRunner{})
+	b.cfg.TargetOS = targetLinux
+	b.cfg.HyperV.Image = `C:\Images\debian-cloud.vhdx`
+	b.cfg.HyperV.User = "-guest"
+	_, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}})
+	if err == nil || !strings.Contains(err.Error(), "start with a lowercase letter or underscore") {
+		t.Fatalf("Acquire error=%v", err)
+	}
+}
+
 func TestCreateLinuxVMConnectsNetworkBeforeBootWithoutPowerShellDirect(t *testing.T) {
 	runner := &recordingRunner{}
 	b := testBackend(runner)
