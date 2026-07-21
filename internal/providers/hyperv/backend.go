@@ -41,6 +41,8 @@ type backend struct {
 	waitWindowsVNC         func(context.Context, *SSHTarget, io.Writer, time.Duration) error
 	ensureLeaseKey         func(Config, string) (string, string, error)
 	logoutTailscale        func(context.Context, core.SSHTarget) (string, error)
+	runSSHOutput           func(context.Context, SSHTarget, string) (string, error)
+	cacheRoot              string
 }
 
 var hypervHostOS = runtime.GOOS
@@ -76,6 +78,8 @@ func newBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
 		ensureLeaseKey:         ensureTestboxKeyForConfig,
 		waitWindowsVNC:         core.WaitForManagedWindowsLoopbackVNC,
 		logoutTailscale:        core.LogoutTailscaleTarget,
+		runSSHOutput:           core.RunSSHOutput,
+		cacheRoot:              hypervCacheRoot(),
 	}
 }
 
@@ -230,7 +234,7 @@ func (b *backend) acquireWindows(ctx context.Context, req AcquireRequest) (Lease
 		Server:  b.serverFromInstance(hypervVM{Name: name, State: 2}, claim, cfg),
 		LeaseID: leaseID,
 	}
-	if err := persistLease(leaseID, slug, name, cfg, req, provisional); err != nil {
+	if err := persistLease(leaseID, slug, name, cfg, req, provisional, nil); err != nil {
 		return LeaseTarget{}, fmt.Errorf("persist hyperv lease before bootstrap: %w", err)
 	}
 	cleanupKey = false
@@ -293,6 +297,10 @@ func (b *backend) acquireWindows(ctx context.Context, req AcquireRequest) (Lease
 	if err != nil {
 		return LeaseTarget{}, errors.Join(err, cleanupFailedLease())
 	}
+	attachedCaches, err := b.attachConfiguredCacheVolumes(ctx, name, cfg, lease)
+	if err != nil {
+		return LeaseTarget{}, errors.Join(err, cleanupFailedLease())
+	}
 	if err := b.finalizeWindowsCapabilities(ctx, cfg, name, &lease); err != nil {
 		return LeaseTarget{}, errors.Join(err, cleanupFailedLease())
 	}
@@ -300,7 +308,7 @@ func (b *backend) acquireWindows(ctx context.Context, req AcquireRequest) (Lease
 		return LeaseTarget{}, errors.Join(err, cleanupFailedLease())
 	}
 	tailscaleJoined = cfg.Tailscale.Enabled
-	if err := persistLease(leaseID, slug, name, cfg, req, lease); err != nil {
+	if err := persistLease(leaseID, slug, name, cfg, req, lease, core.CacheVolumeStickyDiskSpecs(attachedCaches)); err != nil {
 		return LeaseTarget{}, errors.Join(err, cleanupFailedLease())
 	}
 	cleanupKey = false
@@ -310,8 +318,8 @@ func (b *backend) acquireWindows(ctx context.Context, req AcquireRequest) (Lease
 
 // persistLease records ownership before VM creation, then atomically updates
 // the same claim with its SSH endpoint after bootstrap.
-func persistLease(leaseID, slug, name string, cfg Config, req AcquireRequest, lease LeaseTarget) error {
-	return claimLeaseForRepoProviderScopePondEndpoint(leaseID, slug, providerName, instanceScope(name), cfg.Pond, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, lease.Server, lease.SSH)
+func persistLease(leaseID, slug, name string, cfg Config, req AcquireRequest, lease LeaseTarget, cacheVolumes []string) error {
+	return claimLeaseForRepoProviderScopePondEndpointCacheVolumes(leaseID, slug, providerName, instanceScope(name), cfg.Pond, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, lease.Server, lease.SSH, cacheVolumes)
 }
 
 func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget, error) {
@@ -446,8 +454,44 @@ func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) err
 			}
 		}
 	}
-	if err := b.removeVM(ctx, name); err != nil {
-		return err
+	cfg := b.configForRun()
+	switch target := strings.TrimSpace(lease.Server.Labels["target"]); target {
+	case targetLinux, targetWindows:
+		cfg.TargetOS = target
+	}
+	if user := strings.TrimSpace(lease.Server.Labels["ssh_user"]); user != "" {
+		cfg.HyperV.User = user
+		cfg.SSHUser = user
+	}
+	if workRoot := strings.TrimSpace(lease.Server.Labels["work_root"]); workRoot != "" {
+		cfg.HyperV.WorkRoot = workRoot
+		cfg.WorkRoot = workRoot
+	}
+	var detachedCaches []hypervDetachedCacheVolume
+	var detachErr error
+	if lease.Server.Status != "missing" {
+		lockedCaches, resolvedTarget, lockErr := b.lockLeaseCacheVolumes(ctx, lease.LeaseID, cfg, lease.SSH, false)
+		if lockErr != nil {
+			return errors.Join(lockErr, releaseDetachedCacheVolumeLocks(lockedCaches))
+		}
+		detachedCaches = lockedCaches
+		stopScript := fmt.Sprintf(`$vm=Get-VM -Name '%s' -ErrorAction SilentlyContinue; if ($vm -and $vm.State -ne 'Off') { Stop-VM -VM $vm -Force -Confirm:$false -ErrorAction Stop }`, escapePSString(name))
+		result, err := b.powershell(ctx, stopScript)
+		if err != nil {
+			return errors.Join(commandError("stop Hyper-V VM before cache detach", result, err), releaseDetachedCacheVolumeLocks(detachedCaches))
+		}
+		detachedCaches, detachErr = b.detachLockedCacheVolumes(ctx, name, cfg, resolvedTarget, detachedCaches, false)
+		if detachErr != nil {
+			fmt.Fprintf(b.rt.Stderr, "warning: Hyper-V cache detach before release failed; VM removal will detach preserved cache disks: %v\n", detachErr)
+		}
+	}
+	removeErr := b.removeVM(ctx, name)
+	lockErr := releaseDetachedCacheVolumeLocks(detachedCaches)
+	if removeErr != nil {
+		return errors.Join(removeErr, detachErr, lockErr)
+	}
+	if lockErr != nil {
+		return lockErr
 	}
 	if lease.LeaseID != "" {
 		pruneLeaseState(lease.LeaseID)

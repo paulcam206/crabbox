@@ -190,6 +190,16 @@ func claimLeaseForRepoProviderScopePondEndpoint(leaseID, slug, provider, provide
 	})
 }
 
+func claimLeaseForRepoProviderScopePondEndpointCacheVolumes(leaseID, slug, provider, providerScope, pond, repoRoot string, idleTimeout time.Duration, reclaim bool, server Server, target SSHTarget, cacheVolumes []string) error {
+	return claimLeaseForRepoProviderScopePondDetailsMetadata(leaseID, slug, provider, providerScope, pond, staticClaimDetails{}, repoRoot, idleTimeout, reclaim, claimMetadata{
+		setEndpoint:     true,
+		server:          server,
+		target:          target,
+		setCacheVolumes: true,
+		cacheVolumes:    cacheVolumes,
+	})
+}
+
 func claimLeaseForRepoProviderScopePondEndpointReservationIfUnchanged(leaseID, slug, provider, providerScope, pond, repoRoot string, idleTimeout time.Duration, reclaim bool, server Server, target SSHTarget, reservationLabel string, reservationDuration time.Duration, expected leaseClaim, expectedExists bool) (leaseClaim, error) {
 	var updated leaseClaim
 	err := claimLeaseForRepoProviderScopePondDetailsMetadata(leaseID, slug, provider, providerScope, pond, staticClaimDetails{}, repoRoot, idleTimeout, reclaim, claimMetadata{
