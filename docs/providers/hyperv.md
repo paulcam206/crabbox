@@ -401,7 +401,11 @@ Before checkpoint create/export or restore, Hyper-V unmounts and detaches every
 recorded cache disk while holding its short host lock, then reattaches and
 remounts it on both success and failure. Windows uses PowerShell Direct for the
 guest mount transition; Linux uses SSH and verifies the recorded filesystem
-UUID. Cache disks are excluded from exported workspace state.
+UUID. While a disk is detached, Crabbox replaces its guest mount directory with
+a protected marker file so workloads cannot write into the underlying root
+disk. Linux also removes the matching `/etc/fstab` entry; reattachment removes
+the marker and replaces any stale entries for that mount path with the current
+cache UUID. Cache disks are excluded from exported workspace state.
 
 Fork import removes inherited provider cache disks before offline
 specialization, then attaches only the new lease's requested caches after

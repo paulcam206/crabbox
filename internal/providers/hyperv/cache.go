@@ -21,6 +21,7 @@ import (
 const (
 	hypervCacheMetadataVersion = 1
 	hypervCacheDefaultSizeGB   = 80
+	hypervCacheDetachedGuard   = "crabbox-cache-detached-v1"
 )
 
 var hypervCacheLockWait = 10 * time.Second
@@ -550,7 +551,7 @@ func (b *backend) mountWindowsCacheVolume(ctx context.Context, vmName, user stri
 		label = label[:32]
 	}
 	script := fmt.Sprintf(
-		`$ErrorActionPreference='Stop'; $diskID='%s'.Replace('-','').Replace('{','').Replace('}',''); $target=[IO.Path]::GetFullPath('%s').TrimEnd('\'); `+
+		`$ErrorActionPreference='Stop'; $diskID='%s'.Replace('-','').Replace('{','').Replace('}',''); $target=[IO.Path]::GetFullPath('%s').TrimEnd('\'); $guard='%s'; `+
 			`$targetRoot=[IO.Path]::GetPathRoot($target); if (-not (Test-Path -LiteralPath $targetRoot)) { throw ('Crabbox cache mount drive does not exist: '+$targetRoot) }; `+
 			`$disk=$null; for ($attempt=0; $attempt -lt 30 -and -not $disk; $attempt++) { `+
 			`$disk=Get-Disk | Where-Object { $_.UniqueId -and $_.UniqueId.Replace('-','').Replace('{','').Replace('}','').Trim().EndsWith($diskID,[StringComparison]::OrdinalIgnoreCase) } | Select-Object -First 1; `+
@@ -564,12 +565,16 @@ func (b *backend) mountWindowsCacheVolume(ctx context.Context, vmName, user stri
 			`else { $volume=$partition | Get-Volume -ErrorAction SilentlyContinue; if (-not $volume -or [string]::IsNullOrWhiteSpace($volume.FileSystem)) { throw 'existing Crabbox cache filesystem could not be identified' }; `+
 			`if ($volume.FileSystem -ne 'NTFS') { throw ('Crabbox cache filesystem mismatch: '+$volume.FileSystem) } }; `+
 			`$mounted=@($partition.AccessPaths | ForEach-Object { if ($_){[IO.Path]::GetFullPath($_).TrimEnd('\')} }); `+
-			`if ($mounted -notcontains $target) { if (-not (Test-Path -LiteralPath $target)) { New-Item -ItemType Directory -Path $target -Force -ErrorAction Stop | Out-Null }; `+
+			`if ($mounted -notcontains $target) { `+
+			`if (Test-Path -LiteralPath $target -PathType Leaf) { if ((Get-Content -Raw -LiteralPath $target) -ne $guard) { throw 'Crabbox cache mount path is occupied by an unexpected file' }; Remove-Item -LiteralPath $target -Force -ErrorAction Stop } `+
+			`elseif ((Test-Path -LiteralPath $target) -and -not (Test-Path -LiteralPath $target -PathType Container)) { throw 'Crabbox cache mount path is not a directory' }; `+
+			`if (-not (Test-Path -LiteralPath $target)) { New-Item -ItemType Directory -Path $target -Force -ErrorAction Stop | Out-Null }; `+
 			`if (Get-ChildItem -LiteralPath $target -Force -ErrorAction Stop | Select-Object -First 1) { throw 'Crabbox cache mount path is not empty' }; `+
 			`Add-PartitionAccessPath -DiskNumber $disk.Number -PartitionNumber $partition.PartitionNumber -AccessPath $target -ErrorAction Stop }; `+
 			`icacls.exe $target /grant ($env:USERNAME+':(OI)(CI)M') /C | Out-Null; if ($LASTEXITCODE -ne 0) { throw 'grant cache directory access failed' }`,
 		escapePSString(metadata.DiskID),
 		escapePSString(volume.Path),
+		escapePSString(hypervCacheDetachedGuard),
 		escapePSString(label),
 	)
 	return b.invokeInGuest(ctx, vmName, user, script, "mount Hyper-V Windows cache volume")
@@ -577,14 +582,19 @@ func (b *backend) mountWindowsCacheVolume(ctx context.Context, vmName, user stri
 
 func (b *backend) unmountWindowsCacheVolume(ctx context.Context, vmName, user string, volume core.CacheVolumeConfig, metadata hypervCacheMetadata) error {
 	script := fmt.Sprintf(
-		`$ErrorActionPreference='Stop'; $diskID='%s'.Replace('-','').Replace('{','').Replace('}',''); $target=[IO.Path]::GetFullPath('%s').TrimEnd('\'); `+
+		`$ErrorActionPreference='Stop'; $diskID='%s'.Replace('-','').Replace('{','').Replace('}',''); $target=[IO.Path]::GetFullPath('%s').TrimEnd('\'); $guard='%s'; `+
 			`$disk=Get-Disk | Where-Object { $_.UniqueId -and $_.UniqueId.Replace('-','').Replace('{','').Replace('}','').Trim().EndsWith($diskID,[StringComparison]::OrdinalIgnoreCase) } | Select-Object -First 1; `+
 			`if (-not $disk) { return }; $partition=Get-Partition -DiskNumber $disk.Number -ErrorAction SilentlyContinue | Where-Object Type -eq 'Basic' | Select-Object -First 1; `+
 			`if (-not $partition) { return }; $access=$partition.AccessPaths | Where-Object { $_ -and [IO.Path]::GetFullPath($_).TrimEnd('\').Equals($target,[StringComparison]::OrdinalIgnoreCase) } | Select-Object -First 1; `+
 			`if ($access) { Remove-PartitionAccessPath -DiskNumber $disk.Number -PartitionNumber $partition.PartitionNumber -AccessPath $access -ErrorAction Stop }; `+
+			`if (Test-Path -LiteralPath $target -PathType Leaf) { if ((Get-Content -Raw -LiteralPath $target) -ne $guard) { throw 'Crabbox cache mount path is occupied by an unexpected file' } } `+
+			`else { if (Test-Path -LiteralPath $target) { if (-not (Test-Path -LiteralPath $target -PathType Container)) { throw 'Crabbox cache mount path is not a directory' }; `+
+			`if (Get-ChildItem -LiteralPath $target -Force -ErrorAction Stop | Select-Object -First 1) { throw 'Crabbox cache mount path changed after unmount' }; Remove-Item -LiteralPath $target -Force -ErrorAction Stop }; `+
+			`Set-Content -NoNewline -Encoding ASCII -LiteralPath $target -Value $guard -ErrorAction Stop }; `+
 			`Set-Disk -Number $disk.Number -IsOffline $true -ErrorAction Stop`,
 		escapePSString(metadata.DiskID),
 		escapePSString(volume.Path),
+		escapePSString(hypervCacheDetachedGuard),
 	)
 	return b.invokeInGuest(ctx, vmName, user, script, "unmount Hyper-V Windows cache volume")
 }
@@ -603,6 +613,7 @@ func (b *backend) mountLinuxCacheVolume(ctx context.Context, target SSHTarget, u
 		"disk_id=" + posixShellQuote(diskID),
 		"mount_path=" + posixShellQuote(path.Clean(volume.Path)),
 		"fstab_path=" + posixShellQuote(fstabPath),
+		"guard=" + posixShellQuote(hypervCacheDetachedGuard),
 		"device=''",
 		`[ -n "$disk_id" ] || { echo 'Crabbox cache disk identity is missing' >&2; exit 1; }`,
 		`for attempt in $(seq 1 30); do`,
@@ -625,6 +636,13 @@ func (b *backend) mountLinuxCacheVolume(ctx context.Context, target SSHTarget, u
 		`[ "$fstype" = ext4 ] || { echo "Crabbox cache filesystem mismatch: $fstype" >&2; exit 1; }`,
 		`uuid="$(sudo blkid -o value -s UUID "$device")"`,
 		`if [ -n "$expected_uuid" ] && [ "$uuid" != "$expected_uuid" ]; then echo 'Crabbox cache UUID mismatch' >&2; exit 1; fi`,
+		`if [ -f "$mount_path" ]; then`,
+		`  [ "$(sudo cat "$mount_path")" = "$guard" ] || { echo 'Crabbox cache mount path is occupied by an unexpected file' >&2; exit 1; }`,
+		`  sudo rm -f "$mount_path"`,
+		`elif [ -e "$mount_path" ] && [ ! -d "$mount_path" ]; then`,
+		`  echo 'Crabbox cache mount path is not a directory' >&2`,
+		`  exit 1`,
+		`fi`,
 		`sudo mkdir -p "$mount_path"`,
 		`if mountpoint -q "$mount_path"; then`,
 		`  mounted_uuid="$(findmnt -n -o UUID --target "$mount_path" || true)"`,
@@ -634,7 +652,11 @@ func (b *backend) mountLinuxCacheVolume(ctx context.Context, target SSHTarget, u
 		`  sudo mount -U "$uuid" "$mount_path"`,
 		`fi`,
 		`entry="UUID=$uuid $fstab_path ext4 defaults,nofail 0 2"`,
-		`grep -Fqx -- "$entry" /etc/fstab || printf '%s\n' "$entry" | sudo tee -a /etc/fstab >/dev/null`,
+		`fstab_tmp="$(mktemp)"`,
+		`awk -v mount="$fstab_path" 'NF < 2 || $2 != mount { print }' /etc/fstab >"$fstab_tmp"`,
+		`printf '%s\n' "$entry" >>"$fstab_tmp"`,
+		`sudo install -m 0644 "$fstab_tmp" /etc/fstab`,
+		`rm -f "$fstab_tmp"`,
 		`sudo chown ` + posixShellQuote(user+":"+user) + ` "$mount_path"`,
 		`printf '%s\n' "$uuid"`,
 	}, "\n")
@@ -663,11 +685,28 @@ func (b *backend) unmountLinuxCacheVolume(ctx context.Context, target SSHTarget,
 	script := strings.Join([]string{
 		"set -eu",
 		"mount_path=" + posixShellQuote(path.Clean(volume.Path)),
+		"fstab_path=" + posixShellQuote(escapeFstabPath(path.Clean(volume.Path))),
 		"expected_uuid=" + posixShellQuote(strings.TrimSpace(metadata.FilesystemID)),
+		"guard=" + posixShellQuote(hypervCacheDetachedGuard),
 		`if mountpoint -q "$mount_path"; then`,
 		`  mounted_uuid="$(findmnt -n -o UUID --target "$mount_path" || true)"`,
 		`  [ -z "$expected_uuid" ] || [ "$mounted_uuid" = "$expected_uuid" ] || { echo 'Crabbox cache mount identity changed' >&2; exit 1; }`,
 		`  sudo umount "$mount_path"`,
+		`fi`,
+		`fstab_tmp="$(mktemp)"`,
+		`awk -v mount="$fstab_path" 'NF < 2 || $2 != mount { print }' /etc/fstab >"$fstab_tmp"`,
+		`sudo install -m 0644 "$fstab_tmp" /etc/fstab`,
+		`rm -f "$fstab_tmp"`,
+		`if [ -f "$mount_path" ]; then`,
+		`  [ "$(sudo cat "$mount_path")" = "$guard" ] || { echo 'Crabbox cache mount path is occupied by an unexpected file' >&2; exit 1; }`,
+		`else`,
+		`  if [ -e "$mount_path" ]; then`,
+		`    [ -d "$mount_path" ] || { echo 'Crabbox cache mount path is not a directory' >&2; exit 1; }`,
+		`    [ -z "$(sudo find "$mount_path" -mindepth 1 -maxdepth 1 -print -quit)" ] || { echo 'Crabbox cache mount path changed after unmount' >&2; exit 1; }`,
+		`    sudo rmdir "$mount_path"`,
+		`  fi`,
+		`  printf '%s' "$guard" | sudo tee "$mount_path" >/dev/null`,
+		`  sudo chmod 000 "$mount_path"`,
 		`fi`,
 	}, "\n")
 	if _, err := b.runSSHOutput(ctx, target, script); err != nil {

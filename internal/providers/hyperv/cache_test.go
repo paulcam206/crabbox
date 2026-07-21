@@ -417,6 +417,8 @@ func TestWindowsCacheMountUsesDiskIdentityNTFSAndDirectoryAccessPath(t *testing.
 		"Add-PartitionAccessPath",
 		`D:\crabbox-cache\nuget`,
 		"icacls.exe",
+		hypervCacheDetachedGuard,
+		"PathType Leaf",
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("Windows cache mount script missing %q: %s", want, script)
@@ -424,6 +426,28 @@ func TestWindowsCacheMountUsesDiskIdentityNTFSAndDirectoryAccessPath(t *testing.
 	}
 	if strings.Contains(script, "DriveLetter") {
 		t.Fatalf("Windows cache mount assigned a drive letter: %s", script)
+	}
+}
+
+func TestWindowsCacheUnmountInstallsDetachedGuard(t *testing.T) {
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	b := testBackend(runner)
+	if err := b.unmountWindowsCacheVolume(context.Background(), "crabbox-test", "crabbox", core.CacheVolumeConfig{
+		Key:  "nuget-cache",
+		Path: `D:\crabbox-cache\nuget`,
+	}, hypervCacheMetadata{DiskID: "11111111-2222-3333-4444-555555555555"}); err != nil {
+		t.Fatal(err)
+	}
+	script := findScript(runner.calls, "Remove-PartitionAccessPath")
+	for _, want := range []string{
+		hypervCacheDetachedGuard,
+		"Crabbox cache mount path changed after unmount",
+		"Set-Content -NoNewline",
+		"Set-Disk -Number $disk.Number -IsOffline $true",
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("Windows cache unmount script missing %q: %s", want, script)
+		}
 	}
 }
 
@@ -452,6 +476,9 @@ func TestLinuxCacheMountFormatsExt4AndPersistsUUIDMount(t *testing.T) {
 		"mkfs.ext4",
 		`sudo mount -U "$uuid" "$mount_path"`,
 		"/etc/fstab",
+		hypervCacheDetachedGuard,
+		`awk -v mount="$fstab_path"`,
+		`sudo install -m 0644 "$fstab_tmp" /etc/fstab`,
 		"sudo chown 'crabbox:crabbox'",
 	} {
 		if !strings.Contains(remote, want) {
@@ -499,6 +526,9 @@ func TestLinuxCacheUnmountVerifiesFilesystemIdentity(t *testing.T) {
 		"findmnt -n -o UUID",
 		"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
 		`sudo umount "$mount_path"`,
+		hypervCacheDetachedGuard,
+		`awk -v mount="$fstab_path"`,
+		`sudo chmod 000 "$mount_path"`,
 	} {
 		if !strings.Contains(remote, want) {
 			t.Fatalf("Linux cache unmount command missing %q: %s", want, remote)
@@ -698,14 +728,21 @@ func TestReleaseLeaseDoesNotStopVMWhenCacheLockIsBusy(t *testing.T) {
 	hypervCacheLockWait = 50 * time.Millisecond
 	t.Cleanup(func() { hypervCacheLockWait = oldWait })
 
+	remoteCleanupCalled := false
 	err = b.ReleaseLease(context.Background(), ReleaseLeaseRequest{
 		Lease: LeaseTarget{LeaseID: leaseID, Server: server},
+		GuardedRemoteCleanup: func(context.Context, LeaseTarget) {
+			remoteCleanupCalled = true
+		},
 	})
 	if err == nil || !strings.Contains(err.Error(), "cache volume is busy") {
 		t.Fatalf("err=%v", err)
 	}
 	if findCallIndex(runner.calls, "Stop-VM") >= 0 || findCallIndex(runner.calls, "Remove-VM") >= 0 {
 		t.Fatal("release mutated the VM before acquiring cache locks")
+	}
+	if remoteCleanupCalled {
+		t.Fatal("release ran remote cleanup before acquiring cache locks")
 	}
 }
 
