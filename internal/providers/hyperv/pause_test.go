@@ -312,7 +312,7 @@ func pauseTestLease(t *testing.T, state int, ip string) (*backend, *recordingRun
 		Server:  b.serverFromInstance(hypervVM{Name: name, State: hypervStateRunning}, claim, cfg),
 		SSH:     sshTargetFromConfig(cfg, ip),
 	}
-	if err := persistLease(leaseID, claim.Slug, name, cfg, AcquireRequest{Repo: core.Repo{Root: t.TempDir()}}, lease); err != nil {
+	if err := persistLease(leaseID, claim.Slug, name, cfg, AcquireRequest{Repo: core.Repo{Root: t.TempDir()}}, lease, nil); err != nil {
 		t.Fatalf("persistLease: %v", err)
 	}
 	return b, runner, leaseID, name
