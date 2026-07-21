@@ -244,6 +244,7 @@ type Config struct {
 	tartMemoryExplicit            bool
 	Lume                          LumeConfig
 	HyperV                        HyperVConfig
+	hyperVWorkRootExplicit        bool
 	WindowsSandbox                WindowsSandboxConfig
 	Tailscale                     TailscaleConfig
 	Static                        StaticConfig
@@ -2146,7 +2147,7 @@ func applyProviderConfigDefaults(cfg *Config) error {
 			cfg.TargetOS = targetWindows
 		}
 		cfg.SSHFallbackPorts = nil
-		if cfg.TargetOS == targetLinux && isDefaultWorkRoot(cfg.HyperV.WorkRoot) {
+		if cfg.TargetOS == targetLinux && !cfg.hyperVWorkRootExplicit && isDefaultWorkRoot(cfg.HyperV.WorkRoot) {
 			cfg.HyperV.WorkRoot = defaultPOSIXWorkRoot
 		}
 		if cfg.HyperV.User != "" {
@@ -7672,6 +7673,7 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		}
 		if file.HyperV.WorkRoot != "" {
 			cfg.HyperV.WorkRoot = file.HyperV.WorkRoot
+			cfg.hyperVWorkRootExplicit = true
 		}
 		if file.HyperV.SecureBoot != "" {
 			cfg.HyperV.SecureBoot = file.HyperV.SecureBoot
@@ -9625,7 +9627,10 @@ func applyEnv(cfg *Config) error {
 	cfg.Lume.WorkRoot = getenv("CRABBOX_LUME_WORK_ROOT", cfg.Lume.WorkRoot)
 	cfg.HyperV.Image = getenv("CRABBOX_HYPERV_IMAGE", cfg.HyperV.Image)
 	cfg.HyperV.User = getenv("CRABBOX_HYPERV_USER", cfg.HyperV.User)
-	cfg.HyperV.WorkRoot = getenv("CRABBOX_HYPERV_WORK_ROOT", cfg.HyperV.WorkRoot)
+	if value := os.Getenv("CRABBOX_HYPERV_WORK_ROOT"); value != "" {
+		cfg.HyperV.WorkRoot = value
+		cfg.hyperVWorkRootExplicit = true
+	}
 	cfg.HyperV.SecureBoot = getenv("CRABBOX_HYPERV_SECURE_BOOT", cfg.HyperV.SecureBoot)
 	cfg.HyperV.CPUs = getenvInt("CRABBOX_HYPERV_CPUS", cfg.HyperV.CPUs)
 	cfg.HyperV.Memory = getenvInt("CRABBOX_HYPERV_MEMORY", cfg.HyperV.Memory)
