@@ -428,30 +428,6 @@ func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) err
 	if err := requireExactHyperVClaim(lease.LeaseID, name); err != nil {
 		return err
 	}
-	if req.GuardedRemoteCleanup != nil {
-		vm, err := b.queryVM(ctx, name)
-		if err != nil {
-			return err
-		}
-		if vm.State == hypervStateRunning {
-			claim, ok, exact, claimErr := core.ResolveLeaseClaimForProviderWithExact(lease.LeaseID, providerName)
-			if claimErr != nil {
-				return claimErr
-			}
-			if !ok || !exact {
-				return exit(4, "hyperv lease %q lost its exact local claim before remote cleanup", lease.LeaseID)
-			}
-			cleanupLease, prepareErr := b.prepareLease(ctx, b.configForRun(), vm, b.getIPFromClaim(claim), claim, false)
-			if prepareErr != nil {
-				fmt.Fprintf(b.rt.Stderr, "warning: skipping guarded remote cleanup for Hyper-V VM %s: %v\n", name, prepareErr)
-			} else {
-				req.GuardedRemoteCleanup(ctx, cleanupLease)
-			}
-			if err := requireExactHyperVClaim(lease.LeaseID, name); err != nil {
-				return err
-			}
-		}
-	}
 	cfg := b.configForRun()
 	switch target := strings.TrimSpace(lease.Server.Labels["target"]); target {
 	case targetLinux, targetWindows:
@@ -467,12 +443,19 @@ func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) err
 	}
 	var detachedCaches []hypervDetachedCacheVolume
 	var detachErr error
+	var resolvedTarget SSHTarget
 	if lease.Server.Status != "missing" {
-		lockedCaches, resolvedTarget, lockErr := b.lockLeaseCacheVolumes(ctx, lease.LeaseID, cfg, lease.SSH, false)
+		lockedCaches, target, lockErr := b.lockLeaseCacheVolumes(ctx, lease.LeaseID, cfg, lease.SSH, false)
 		if lockErr != nil {
 			return errors.Join(lockErr, releaseDetachedCacheVolumeLocks(lockedCaches))
 		}
 		detachedCaches = lockedCaches
+		resolvedTarget = target
+	}
+	if err := b.runGuardedReleaseCleanup(ctx, req, cfg, lease, name); err != nil {
+		return errors.Join(err, releaseDetachedCacheVolumeLocks(detachedCaches))
+	}
+	if lease.Server.Status != "missing" {
 		stopScript := fmt.Sprintf(`$vm=Get-VM -Name '%s' -ErrorAction SilentlyContinue; if ($vm -and $vm.State -ne 'Off') { Stop-VM -VM $vm -Force -Confirm:$false -ErrorAction Stop }`, escapePSString(name))
 		result, err := b.powershell(ctx, stopScript)
 		if err != nil {
@@ -495,6 +478,33 @@ func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) err
 		pruneLeaseState(lease.LeaseID)
 	}
 	return nil
+}
+
+func (b *backend) runGuardedReleaseCleanup(ctx context.Context, req ReleaseLeaseRequest, cfg Config, lease LeaseTarget, name string) error {
+	if req.GuardedRemoteCleanup == nil {
+		return nil
+	}
+	vm, err := b.queryVM(ctx, name)
+	if err != nil {
+		return err
+	}
+	if vm.State != hypervStateRunning {
+		return nil
+	}
+	claim, ok, exact, err := core.ResolveLeaseClaimForProviderWithExact(lease.LeaseID, providerName)
+	if err != nil {
+		return err
+	}
+	if !ok || !exact {
+		return exit(4, "hyperv lease %q lost its exact local claim before remote cleanup", lease.LeaseID)
+	}
+	cleanupLease, prepareErr := b.prepareLease(ctx, cfg, vm, b.getIPFromClaim(claim), claim, false)
+	if prepareErr != nil {
+		fmt.Fprintf(b.rt.Stderr, "warning: skipping guarded remote cleanup for Hyper-V VM %s: %v\n", name, prepareErr)
+	} else {
+		req.GuardedRemoteCleanup(ctx, cleanupLease)
+	}
+	return requireExactHyperVClaim(lease.LeaseID, name)
 }
 
 func pruneLeaseState(leaseID string) {
