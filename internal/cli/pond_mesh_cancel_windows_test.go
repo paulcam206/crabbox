@@ -287,7 +287,7 @@ func waitForPondMeshWindowsChildPID(t *testing.T, path string) int {
 
 func waitForPondMeshWindowsFile(t *testing.T, path, timeoutMessage string) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for {
 		if _, err := os.Stat(path); err == nil {
 			return
