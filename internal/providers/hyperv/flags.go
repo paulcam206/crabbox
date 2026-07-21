@@ -44,6 +44,7 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	}
 	if flagWasSet(fs, "hyperv-work-root") {
 		cfg.HyperV.WorkRoot = *v.WorkRoot
+		core.SetHyperVWorkRootExplicit(cfg)
 	}
 	if flagWasSet(fs, "hyperv-secure-boot") {
 		cfg.HyperV.SecureBoot = *v.SecureBoot

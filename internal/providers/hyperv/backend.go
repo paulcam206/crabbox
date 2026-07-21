@@ -97,7 +97,7 @@ func applyDefaults(cfg *Config) {
 		} else {
 			cfg.HyperV.WorkRoot = `C:\crabbox`
 		}
-	} else if cfg.TargetOS == targetLinux && core.IsDefaultWorkRoot(cfg.HyperV.WorkRoot) {
+	} else if cfg.TargetOS == targetLinux && !core.HyperVWorkRootWasExplicit(*cfg) && core.IsDefaultWorkRoot(cfg.HyperV.WorkRoot) {
 		if !core.IsDefaultWorkRoot(cfg.WorkRoot) {
 			cfg.HyperV.WorkRoot = cfg.WorkRoot
 		} else {

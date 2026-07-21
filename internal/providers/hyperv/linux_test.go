@@ -26,6 +26,19 @@ func TestApplyDefaultsUsesPOSIXWorkRootForLinux(t *testing.T) {
 	}
 }
 
+func TestApplyDefaultsPreservesExplicitLinuxWorkRootSentinel(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = targetLinux
+	cfg.WorkRoot = "/srv/global"
+	cfg.HyperV.WorkRoot = "/work/crabbox"
+	core.SetHyperVWorkRootExplicit(&cfg)
+	applyDefaults(&cfg)
+	if cfg.HyperV.WorkRoot != "/work/crabbox" || cfg.WorkRoot != "/work/crabbox" {
+		t.Fatalf("hyperv.workRoot=%q workRoot=%q", cfg.HyperV.WorkRoot, cfg.WorkRoot)
+	}
+}
+
 func TestLinuxAcquireDoesNotRequireGuestPassword(t *testing.T) {
 	oldOS := hypervHostOS
 	hypervHostOS = "windows"
