@@ -102,6 +102,7 @@ func TestProviderSpecAndAliases(t *testing.T) {
 			core.FeatureBrowser,
 			core.FeatureCleanup,
 			core.FeaturePauseResume,
+			core.FeatureTailscale,
 			core.FeatureCheckpoint,
 			core.FeatureFork,
 			core.FeatureRestore,
@@ -129,6 +130,7 @@ func TestProviderFeaturesAreTargetAware(t *testing.T) {
 		core.FeatureBrowser,
 		core.FeatureCleanup,
 		core.FeaturePauseResume,
+		core.FeatureTailscale,
 	} {
 		if !linux.Has(feature) || !windows.Has(feature) {
 			t.Fatalf("feature %s missing from linux=%v or windows=%v", feature, linux, windows)
@@ -190,12 +192,21 @@ func TestConfigureRejectsMacOS(t *testing.T) {
 	}
 }
 
-func TestConfigureRejectsTailscale(t *testing.T) {
-	cfg := core.BaseConfig()
-	cfg.Provider = providerName
-	cfg.Tailscale.Enabled = true
-	if _, err := (Provider{}).Configure(cfg, core.Runtime{}); err == nil {
-		t.Fatal("Configure accepted tailscale")
+func TestConfigureAcceptsTailscaleForLinuxAndWindows(t *testing.T) {
+	for _, target := range []string{core.TargetLinux, core.TargetWindows} {
+		t.Run(target, func(t *testing.T) {
+			cfg := core.BaseConfig()
+			cfg.Provider = providerName
+			cfg.TargetOS = target
+			if target == core.TargetWindows {
+				cfg.WindowsMode = core.WindowsModeNormal
+			}
+			cfg.Tailscale.Enabled = true
+			cfg.Tailscale.AuthKey = "fixture-only-invalid-value"
+			if _, err := (Provider{}).Configure(cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: &recordingRunner{}}); err != nil {
+				t.Fatalf("Configure rejected target=%s Tailscale: %v", target, err)
+			}
+		})
 	}
 }
 

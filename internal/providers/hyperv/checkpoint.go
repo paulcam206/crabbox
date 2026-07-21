@@ -716,6 +716,7 @@ func (b *backend) ForkNativeCheckpoint(ctx context.Context, req core.NativeCheck
 	cfg.SSHKey = keyPath
 	name := leaseProviderName(leaseID, slug)
 	labels := directLeaseLabels(cfg, leaseID, slug, providerName, "", req.Keep, time.Now().UTC())
+	markHyperVTailscaleLabels(labels, cfg)
 	labels["instance"] = name
 	labels["image"] = paths.config
 	labels["ssh_user"] = cfg.HyperV.User
@@ -731,9 +732,13 @@ func (b *backend) ForkNativeCheckpoint(ctx context.Context, req core.NativeCheck
 		return lease, fmt.Errorf("persist Hyper-V checkpoint fork before import: %w", err)
 	}
 	committed := false
+	tailscaleJoined := false
 	defer func() {
 		if committed {
 			return
+		}
+		if tailscaleJoined {
+			b.logoutWindowsTailscaleBestEffort(context.Background(), name, cfg.HyperV.User)
 		}
 		cleanupErr := b.removeImportedCheckpointVM(context.Background(), name)
 		if cleanupErr == nil {
@@ -769,6 +774,10 @@ func (b *backend) ForkNativeCheckpoint(ctx context.Context, req core.NativeCheck
 	if err != nil {
 		return lease, err
 	}
+	if err := b.bootstrapWindowsTailscale(ctx, name, cfg.HyperV.User, cfg); err != nil {
+		return lease, fmt.Errorf("join forked Hyper-V guest to Tailscale: %w", err)
+	}
+	tailscaleJoined = cfg.Tailscale.Enabled
 	lease, err = b.prepareLease(ctx, cfg, hypervVM{Name: name, State: 2}, ip, claim, true)
 	if err != nil {
 		return lease, err
@@ -828,9 +837,7 @@ func (b *backend) rotateForkGuestIdentity(ctx context.Context, vmName, user, pub
 	identityScript := fmt.Sprintf(
 		`$ErrorActionPreference='Stop'; `+
 			`if ($env:COMPUTERNAME -ne '%s') { Rename-Computer -NewName '%s' -Force }; `+
-			`Stop-Service -Name Tailscale -Force -ErrorAction SilentlyContinue; `+
-			`foreach ($statePath in @('C:\ProgramData\Tailscale\tailscaled.state','C:\ProgramData\Tailscale\server-state.conf','C:\Windows\System32\config\systemprofile\AppData\Local\Tailscale\tailscaled.state')) { `+
-			`Remove-Item -LiteralPath $statePath -Force -ErrorAction SilentlyContinue }; `+
+			`%s`+
 			`$vncPasswordPath='C:\ProgramData\crabbox\vnc.password'; `+
 			`$tightVNCServiceKey='HKLM:\Software\TightVNC\Server'; `+
 			`if ((Test-Path -LiteralPath $vncPasswordPath) -or (Test-Path -LiteralPath $tightVNCServiceKey)) { `+
@@ -846,6 +853,7 @@ func (b *backend) rotateForkGuestIdentity(ctx context.Context, vmName, user, pub
 			`New-ItemProperty -Force -Path $tightVNCServiceKey -Name ControlPassword -PropertyType Binary -Value $encrypted | Out-Null }; `,
 		escapePSString(hostname),
 		escapePSString(hostname),
+		core.TailscaleIdentityResetScript(core.TargetWindows, core.WindowsModeNormal),
 	)
 	if err := b.invokeInGuest(ctx, vmName, user, identityScript+sshAccessScript(user, publicKey, true), "fork identity rotation"); err != nil {
 		return fmt.Errorf("rotate forked Hyper-V guest identity: %w", err)

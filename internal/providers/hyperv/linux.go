@@ -65,6 +65,7 @@ func (b *backend) acquireLinux(ctx context.Context, req AcquireRequest) (LeaseTa
 	cfg.SSHKey = keyPath
 	name := leaseProviderName(leaseID, slug)
 	labels := directLeaseLabels(cfg, leaseID, slug, providerName, "", req.Keep, time.Now().UTC())
+	markHyperVTailscaleLabels(labels, cfg)
 	labels["instance"] = name
 	labels["image"] = cfg.HyperV.Image
 	labels["ssh_user"] = cfg.HyperV.User
@@ -83,19 +84,24 @@ func (b *backend) acquireLinux(ctx context.Context, req AcquireRequest) (LeaseTa
 		return LeaseTarget{}, fmt.Errorf("persist hyperv lease before bootstrap: %w", err)
 	}
 	cleanupKey = false
+	var tailscaleCleanupTarget SSHTarget
+	seedPath := cloudInitSeedPath(name)
 	cleanupFailedLease := func() error {
+		if tailscaleCleanupTarget.Host != "" {
+			b.logoutLinuxTailscaleBestEffort(tailscaleCleanupTarget)
+		}
+		seedErr := b.detachAndRemoveNoCloudSeed(context.Background(), name)
 		if req.Keep {
-			return nil
+			return seedErr
 		}
 		if err := b.removeVM(context.Background(), name); err != nil {
-			return fmt.Errorf("remove failed hyperv lease %s: %w", leaseID, err)
+			return errors.Join(seedErr, fmt.Errorf("remove failed hyperv lease %s: %w", leaseID, err))
 		}
 		pruneLeaseState(leaseID)
-		return nil
+		return seedErr
 	}
 
-	seedPath := cloudInitSeedPath(name)
-	userData := core.CloudInitUserData(cfg, publicKey)
+	userData := core.CloudInitUserData(hypervTailscaleBootstrapConfig(cfg), publicKey)
 	if err := b.createNoCloudSeed(ctx, seedPath, userData, cloudInitMetaData(name)); err != nil {
 		return LeaseTarget{}, errors.Join(err, cleanupFailedLease())
 	}
@@ -106,6 +112,11 @@ func (b *backend) acquireLinux(ctx context.Context, req AcquireRequest) (LeaseTa
 	if err != nil {
 		contractErr := fmt.Errorf("Linux IP discovery requires %s so Get-VMNetworkAdapter can report the DHCP address: %w", linuxImageRequirements, err)
 		return LeaseTarget{}, errors.Join(contractErr, cleanupFailedLease())
+	}
+	if cfg.Tailscale.Enabled {
+		tailscaleCleanupTarget = core.SSHTargetFromConfig(cfg, ip)
+		tailscaleCleanupTarget.Port = sshPort
+		tailscaleCleanupTarget.FallbackPorts = []string{}
 	}
 	lease, err := b.prepareLease(ctx, cfg, hypervVM{Name: name, State: 2}, ip, claim, true)
 	if err != nil {

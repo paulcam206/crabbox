@@ -116,6 +116,62 @@ func TestCreateNoCloudSeedUsesCidataAndCoreCloudInit(t *testing.T) {
 	}
 }
 
+func TestLinuxTailscaleReusesTemporaryNoCloudBootstrap(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
+	const authKey = "fixture-only-invalid-value"
+	var capturedUserData string
+	var userDataPath string
+	runner := &recordingRunner{
+		onRun: func(req core.LocalCommandRequest) {
+			script := req.Args[len(req.Args)-1]
+			if !strings.Contains(script, "NewFileSystemLabel 'cidata'") {
+				return
+			}
+			userDataPath = requestEnv(req, "_CRABBOX_USER_DATA_PATH")
+			data, err := os.ReadFile(userDataPath)
+			if err != nil {
+				t.Errorf("read user-data: %v", err)
+				return
+			}
+			capturedUserData = string(data)
+		},
+	}
+	b := testBackend(runner)
+	cfg := b.configForRun()
+	cfg.TargetOS = targetLinux
+	cfg.SSHUser = "runner"
+	cfg.HyperV.User = "runner"
+	cfg.Tailscale.Enabled = true
+	cfg.Tailscale.AuthKey = authKey
+	cfg.Tailscale.Hostname = "crabbox-linux"
+	cfg.Tailscale.Tags = []string{"tag:crabbox"}
+	userData := core.CloudInitUserData(cfg, "ssh-ed25519 test-public-key")
+
+	if err := b.createNoCloudSeed(context.Background(), cloudInitSeedPath("crabbox-linux"), userData, cloudInitMetaData("crabbox-linux")); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"PasswordAuthentication no",
+		"tailscale up --auth-key=file:/dev/stdin",
+		"/var/lib/crabbox/tailscale-ipv4",
+		authKey,
+	} {
+		if !strings.Contains(capturedUserData, want) {
+			t.Fatalf("Linux Tailscale user-data missing %q", want)
+		}
+	}
+	command := strings.Join(runner.calls[0].Args, " ")
+	if strings.Contains(command, authKey) || strings.Contains(command, "#cloud-config") {
+		t.Fatal("NoCloud Tailscale payload leaked into host command argv")
+	}
+	if _, err := os.Stat(userDataPath); !os.IsNotExist(err) {
+		t.Fatalf("temporary Tailscale user-data remains at %s: %v", userDataPath, err)
+	}
+}
+
 func TestDetachAndRemoveNoCloudSeed(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
