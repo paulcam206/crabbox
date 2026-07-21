@@ -87,11 +87,19 @@ func TestProviderSpecAndAliases(t *testing.T) {
 		t.Fatalf("Name=%q want %s", p.Name(), providerName)
 	}
 	want := core.ProviderSpec{
-		Name:        providerName,
-		Family:      "local-vm",
-		Kind:        core.ProviderKindSSHLease,
-		Targets:     []core.TargetSpec{{OS: core.TargetWindows, WindowsMode: core.WindowsModeNormal}},
-		Features:    core.FeatureSet{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureCleanup},
+		Name:    providerName,
+		Family:  "local-vm",
+		Kind:    core.ProviderKindSSHLease,
+		Targets: []core.TargetSpec{{OS: core.TargetWindows, WindowsMode: core.WindowsModeNormal}},
+		Features: core.FeatureSet{
+			core.FeatureSSH,
+			core.FeatureCrabboxSync,
+			core.FeatureCleanup,
+			core.FeatureCheckpoint,
+			core.FeatureFork,
+			core.FeatureRestore,
+			core.FeatureSnapshot,
+		},
 		Coordinator: core.CoordinatorNever,
 	}
 	if spec := p.Spec(); !reflect.DeepEqual(spec, want) {
@@ -1564,6 +1572,7 @@ func TestEnsureOpenSSHPasswordNotInArgs(t *testing.T) {
 }
 
 func TestResolveInstancePropagatesQueryError(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	runner := &recordingRunner{
 		responses: map[string]core.LocalCommandResult{},
 		errors:    map[string]error{},

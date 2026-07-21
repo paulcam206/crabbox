@@ -32,7 +32,15 @@ func providerTargets() []core.TargetSpec {
 }
 
 func providerFeatures() core.FeatureSet {
-	return core.FeatureSet{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureCleanup}
+	return core.FeatureSet{
+		core.FeatureSSH,
+		core.FeatureCrabboxSync,
+		core.FeatureCleanup,
+		core.FeatureCheckpoint,
+		core.FeatureFork,
+		core.FeatureRestore,
+		core.FeatureSnapshot,
+	}
 }
 
 func (Provider) RegisterFlags(fs *flag.FlagSet, defaults core.Config) any {

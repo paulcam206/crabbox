@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -33,6 +34,8 @@ type backend struct {
 	guestReadyBudget       time.Duration
 	guestInvokeTimeout     time.Duration
 	guestRetryBackoff      time.Duration
+	ensureLeaseKey         func(Config, string) (string, string, error)
+	waitSSHReady           func(context.Context, *SSHTarget, io.Writer, string, time.Duration) error
 }
 
 var hypervHostOS = runtime.GOOS
@@ -61,6 +64,8 @@ func newBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
 		guestReadyBudget:       5 * time.Minute,
 		guestInvokeTimeout:     10 * time.Minute,
 		guestRetryBackoff:      3 * time.Second,
+		ensureLeaseKey:         ensureTestboxKeyForConfig,
+		waitSSHReady:           waitForSSHReady,
 	}
 }
 
@@ -1023,7 +1028,7 @@ func (b *backend) prepareLease(ctx context.Context, cfg Config, inst hypervVM, i
 	target.Port = sshPort
 	target.FallbackPorts = []string{}
 	if wait {
-		if err := waitForSSHReady(ctx, &target, b.rt.Stderr, "hyperv ssh", bootstrapWaitTimeout(cfg)); err != nil {
+		if err := b.waitSSHReady(ctx, &target, b.rt.Stderr, "hyperv ssh", bootstrapWaitTimeout(cfg)); err != nil {
 			return LeaseTarget{}, err
 		}
 		server.Status = "ready"
@@ -1089,6 +1094,9 @@ func (b *backend) removeVMStorage(name string, attachedPaths []string) error {
 	} else if !os.IsNotExist(err) {
 		errs = append(errs, fmt.Errorf("read Hyper-V VHD directory %s: %w", vhdDir, err))
 	}
+	if err := removeOwnedHyperVLeaseTree(filepath.Join(vhdDir, name), vhdDir, name); err != nil {
+		errs = append(errs, err)
+	}
 	if err := removeHyperVConfigFiles(filepath.Join(hypervVMDir(), name)); err != nil {
 		errs = append(errs, err)
 	}
@@ -1136,6 +1144,18 @@ func ownedHyperVCheckpoint(path, vhdDir, name string) bool {
 		}
 	}
 	return true
+}
+
+func removeOwnedHyperVLeaseTree(path, root, name string) error {
+	cleanRoot := filepath.Clean(root)
+	cleanPath := filepath.Clean(path)
+	if !validHyperVVMName(name) || !strings.EqualFold(filepath.Dir(cleanPath), cleanRoot) || !strings.EqualFold(filepath.Base(cleanPath), name) {
+		return exit(2, "refusing to remove unowned Hyper-V lease storage %q", path)
+	}
+	if err := os.RemoveAll(cleanPath); err != nil {
+		return fmt.Errorf("remove Hyper-V lease storage %s: %w", cleanPath, err)
+	}
+	return nil
 }
 
 func (b *backend) removeVHDFile(path string) error {
@@ -1380,6 +1400,11 @@ func missingClaimCleanupReady(claim core.LeaseClaim, now time.Time) (bool, strin
 func shouldCleanup(server Server, claim core.LeaseClaim, hasClaim bool, now time.Time) (bool, string) {
 	if strings.EqualFold(server.Labels["keep"], "true") {
 		return false, "keep=true"
+	}
+	if display := core.LeaseLabelTimeDisplay(server.Labels[hypervCheckpointRestoreReservationLabel]); display != "" {
+		if reservedUntil, err := time.Parse(time.RFC3339, display); err == nil && now.Before(reservedUntil) {
+			return false, "checkpoint restore reserved"
+		}
 	}
 	if !hasClaim {
 		return false, "missing claim"
