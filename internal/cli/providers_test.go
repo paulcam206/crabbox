@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -1845,7 +1846,11 @@ func TestProvidersRecommendRejectsUnknownUseCase(t *testing.T) {
 
 func TestProvidersJSONIncludesBuiltIns(t *testing.T) {
 	root := filepath.Clean(filepath.Join("..", ".."))
-	binary := filepath.Join(t.TempDir(), "crabbox")
+	binaryName := "crabbox"
+	if runtime.GOOS == "windows" {
+		binaryName += ".exe"
+	}
+	binary := filepath.Join(t.TempDir(), binaryName)
 
 	build := exec.Command("go", "build", "-trimpath", "-o", binary, "./cmd/crabbox")
 	build.Dir = root
