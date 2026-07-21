@@ -21,7 +21,7 @@ is the default target when `--target` is omitted.
 | Workspace checkpoint, fork, restore, provider snapshot | Yes | Yes |
 | Tailscale | Yes, through cloud-init | Yes, through PowerShell Direct |
 | Cache volume | Yes | Yes |
-| Code | No | No |
+| Code | Yes, through cloud-init and a local SSH tunnel | No |
 
 Hyper-V must be enabled on the host (`Enable-WindowsOptionalFeature -Online
 -FeatureName Microsoft-Hyper-V-All`). The provider is Windows-only and will
@@ -58,6 +58,31 @@ installs pinned, SHA-256-verified Win32-OpenSSH (matching the guest architecture
 and MinGit packages. Existing installations are reused. The OpenSSH bootstrap
 does not require Windows Update or Features on Demand. ISO images are not
 supported; use an installed VHDX with a known administrator password.
+
+## Linux code-server
+
+Hyper-V advertises the `code` capability only for Linux targets. Create the VM
+with `--code` so cloud-init installs the pinned, checksum-verified code-server
+binary and includes it in the `crabbox-ready` check:
+
+```powershell
+crabbox warmup --provider hyperv --target linux `
+  --hyperv-image 'C:\Images\debian-cloud.vhdx' `
+  --code
+crabbox code --provider hyperv --id <lease-id-or-slug> --open
+```
+
+Hyper-V has coordinator policy `never`, so `crabbox code` does not require a
+broker login. It starts code-server on guest `127.0.0.1:8080`, creates an SSH
+local forward bound to host `127.0.0.1:<port>`, prints or opens the resulting
+local HTTP URL, and remains attached until canceled. `--auth none` is safe in
+this path because neither code-server nor the local listener binds to a
+non-loopback interface.
+
+The persisted lease claim records `code=true`. Reusing a lease for
+`crabbox code` requires that label, so a VM created without `--code` is rejected
+instead of attempting an untracked in-place capability upgrade. Windows targets
+do not advertise `code` and remain explicitly unsupported.
 
 ## Desktop and browser capabilities
 
