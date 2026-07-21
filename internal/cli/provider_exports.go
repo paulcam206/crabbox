@@ -114,6 +114,10 @@ func ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, slug, provider, provide
 	return claimLeaseForRepoProviderScopePondEndpoint(leaseID, slug, provider, providerScope, pond, repoRoot, idleTimeout, reclaim, server, target)
 }
 
+func ClaimLeaseForRepoProviderScopePondEndpointCacheVolumes(leaseID, slug, provider, providerScope, pond, repoRoot string, idleTimeout time.Duration, reclaim bool, server Server, target SSHTarget, cacheVolumes []string) error {
+	return claimLeaseForRepoProviderScopePondEndpointCacheVolumes(leaseID, slug, provider, providerScope, pond, repoRoot, idleTimeout, reclaim, server, target, cacheVolumes)
+}
+
 func ClaimLeaseForRepoProviderScopePondEndpointReservationIfUnchanged(leaseID, slug, provider, providerScope, pond, repoRoot string, idleTimeout time.Duration, reclaim bool, server Server, target SSHTarget, reservationLabel string, reservationDuration time.Duration, expected LeaseClaim, expectedExists bool) (LeaseClaim, error) {
 	return claimLeaseForRepoProviderScopePondEndpointReservationIfUnchanged(leaseID, slug, provider, providerScope, pond, repoRoot, idleTimeout, reclaim, server, target, reservationLabel, reservationDuration, expected, expectedExists)
 }

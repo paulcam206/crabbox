@@ -84,6 +84,10 @@ func claimLeaseForRepoProviderScopePondEndpoint(leaseID, slug, provider, provide
 	return core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, slug, provider, providerScope, pond, repoRoot, idleTimeout, reclaim, server, target)
 }
 
+func claimLeaseForRepoProviderScopePondEndpointCacheVolumes(leaseID, slug, provider, providerScope, pond, repoRoot string, idleTimeout time.Duration, reclaim bool, server Server, target SSHTarget, cacheVolumes []string) error {
+	return core.ClaimLeaseForRepoProviderScopePondEndpointCacheVolumes(leaseID, slug, provider, providerScope, pond, repoRoot, idleTimeout, reclaim, server, target, cacheVolumes)
+}
+
 func updateLeaseClaimEndpointIfUnchanged(leaseID string, expected core.LeaseClaim, server Server, target SSHTarget) error {
 	updated, err := core.UpdateLeaseClaimEndpointIfUnchanged(leaseID, expected, server, target)
 	if err != nil {

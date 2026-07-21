@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gofrs/flock"
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
@@ -111,6 +112,157 @@ func TestCreateNativeCheckpointExportsProductionMetadata(t *testing.T) {
 		if !strings.Contains(createScript, expected) {
 			t.Fatalf("create script missing %q: %s", expected, createScript)
 		}
+	}
+}
+
+func TestCreateNativeCheckpointDetachesAndRestoresCacheVolumesOnSuccessAndFailure(t *testing.T) {
+	for _, failExport := range []bool{false, true} {
+		t.Run(map[bool]string{false: "success", true: "failure"}[failExport], func(t *testing.T) {
+			setCheckpointTestState(t)
+			artifactDir := t.TempDir()
+			runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+			b := testBackend(runner)
+			b.cfg.TargetOS = targetLinux
+			b.cacheRoot = t.TempDir()
+			persistCheckpointSource(t, b)
+			cacheVolume := core.CacheVolumeConfig{
+				Key:      "checkpoint-nuget-cache",
+				Path:     `D:\crabbox-cache\nuget`,
+				Required: true,
+			}
+			writeTestHyperVCacheVolume(t, b, cacheVolume, hypervCacheMetadata{
+				Version:    hypervCacheMetadataVersion,
+				Key:        cacheVolume.Key,
+				Target:     "windows/normal",
+				Filesystem: "ntfs",
+				DiskID:     "11111111-2222-3333-4444-555555555555",
+				SizeGB:     80,
+			})
+			cacheLockPath := b.cacheVolumePaths(cacheVolume.Key).lock
+			lockHeldDuringExport := false
+			if err := core.UpdateLeaseClaimCacheVolumes(testCheckpointLeaseID, core.CacheVolumeStickyDiskSpecs([]core.CacheVolumeConfig{cacheVolume})); err != nil {
+				t.Fatal(err)
+			}
+			runner.respond = func(req core.LocalCommandRequest) (core.LocalCommandResult, error, bool) {
+				script := commandScript(req)
+				switch {
+				case strings.Contains(script, "Select-Object Name,@{Name='ID'"):
+					return jsonResult(t, checkpointVM{Name: testCheckpointVMName, ID: testCheckpointVMID, State: 2}), nil, true
+				case strings.Contains(script, "Export-VMSnapshot"):
+					probe := flock.New(cacheLockPath)
+					locked, lockErr := probe.TryLock()
+					if lockErr == nil && !locked {
+						lockHeldDuringExport = true
+					}
+					if locked {
+						_ = probe.Unlock()
+					}
+					if failExport {
+						return core.LocalCommandResult{Stderr: "export failed"}, errors.New("export failed"), true
+					}
+					configPath := filepath.Join(artifactDir, "hyperv", "exported", "Virtual Machines", "checkpoint.vmcx")
+					if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(configPath, []byte("vmcx"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+					return jsonResult(t, checkpointCreateOutput{
+						SourceVMID:     testCheckpointVMID,
+						SnapshotID:     testCheckpointSnapshot,
+						SnapshotName:   checkpointNameFromScript(script),
+						ExportedConfig: configPath,
+					}), nil, true
+				case strings.Contains(script, "ConvertTo-Json -InputObject $items"):
+					return core.LocalCommandResult{Stdout: "[]"}, nil, true
+				case strings.Contains(script, "Add-VMHardDiskDrive"):
+					return jsonResult(t, hypervCacheAttachOutput{ControllerLocation: 1}), nil, true
+				case strings.Contains(script, "Invoke-Command"):
+					return core.LocalCommandResult{}, nil, true
+				default:
+					return core.LocalCommandResult{}, nil, false
+				}
+			}
+			oldOS := hypervHostOS
+			hypervHostOS = "windows"
+			t.Cleanup(func() { hypervHostOS = oldOS })
+
+			_, err := b.createNativeCheckpoint(context.Background(), core.NativeCheckpointCreateRequest{
+				Config:      b.cfg,
+				Runtime:     b.rt,
+				Server:      checkpointSourceServer(b),
+				Target:      core.SSHTarget{TargetOS: core.TargetWindows, WindowsMode: core.WindowsModeNormal},
+				LeaseID:     testCheckpointLeaseID,
+				Name:        "cache-safe",
+				RepoName:    "my-app",
+				ArtifactDir: artifactDir,
+				Strategy:    "disk-snapshot",
+			})
+			if failExport && err == nil {
+				t.Fatal("checkpoint unexpectedly succeeded")
+			}
+			if !failExport && err != nil {
+				t.Fatal(err)
+			}
+			unmountIndex := findCallIndex(runner.calls, "Remove-PartitionAccessPath")
+			detachIndex := findCallIndex(runner.calls, "Remove-VMHardDiskDrive -ErrorAction Stop")
+			checkpointIndex := findCallIndex(runner.calls, "Checkpoint-VM")
+			reattachIndex := findCallIndex(runner.calls, "Add-VMHardDiskDrive")
+			if unmountIndex < 0 || detachIndex <= unmountIndex || checkpointIndex <= detachIndex || reattachIndex <= checkpointIndex {
+				t.Fatalf("cache checkpoint order unmount=%d detach=%d checkpoint=%d reattach=%d", unmountIndex, detachIndex, checkpointIndex, reattachIndex)
+			}
+			if script := commandScript(runner.calls[unmountIndex]); !strings.Contains(script, "Set-Disk -Number $disk.Number -IsOffline $true") {
+				t.Fatalf("Windows cache was not offlined before detach: %s", script)
+			}
+			if !lockHeldDuringExport {
+				t.Fatal("cache host lock was not held across checkpoint export")
+			}
+			probe := flock.New(cacheLockPath)
+			locked, lockErr := probe.TryLock()
+			if lockErr != nil || !locked {
+				t.Fatalf("cache host lock was not released: locked=%v err=%v", locked, lockErr)
+			}
+			if err := probe.Unlock(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestCreateNativeCheckpointRequiresRunningCacheBackedLease(t *testing.T) {
+	setCheckpointTestState(t)
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	b := testBackend(runner)
+	b.cacheRoot = t.TempDir()
+	persistCheckpointSource(t, b)
+	cacheVolume := core.CacheVolumeConfig{
+		Key:      "paused-checkpoint-cache",
+		Path:     `D:\crabbox-cache\nuget`,
+		Required: true,
+	}
+	if err := core.UpdateLeaseClaimCacheVolumes(testCheckpointLeaseID, core.CacheVolumeStickyDiskSpecs([]core.CacheVolumeConfig{cacheVolume})); err != nil {
+		t.Fatal(err)
+	}
+	runner.respond = func(req core.LocalCommandRequest) (core.LocalCommandResult, error, bool) {
+		if strings.Contains(commandScript(req), "Select-Object Name,@{Name='ID'") {
+			return jsonResult(t, checkpointVM{Name: testCheckpointVMName, ID: testCheckpointVMID, State: 6}), nil, true
+		}
+		return core.LocalCommandResult{}, nil, false
+	}
+	_, err := b.createNativeCheckpoint(context.Background(), core.NativeCheckpointCreateRequest{
+		Config:      b.cfg,
+		Runtime:     b.rt,
+		Server:      checkpointSourceServer(b),
+		Target:      core.SSHTarget{TargetOS: core.TargetWindows, WindowsMode: core.WindowsModeNormal},
+		LeaseID:     testCheckpointLeaseID,
+		Name:        "paused-cache",
+		ArtifactDir: t.TempDir(),
+	})
+	if err == nil || !strings.Contains(err.Error(), "resume the lease") {
+		t.Fatalf("err=%v", err)
+	}
+	if findCallIndex(runner.calls, "Invoke-Command") >= 0 || findCallIndex(runner.calls, "Checkpoint-VM") >= 0 {
+		t.Fatal("checkpoint mutated a non-running cache-backed lease")
 	}
 }
 
@@ -222,22 +374,43 @@ func TestRestoreNativeCheckpointRefreshesClaimEndpoint(t *testing.T) {
 	setCheckpointTestState(t)
 	paths, metadata := createCheckpointArtifact(t)
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	var cacheVHDPath string
 	runner.respond = func(req core.LocalCommandRequest) (core.LocalCommandResult, error, bool) {
 		script := commandScript(req)
 		switch {
 		case strings.Contains(script, "Select-Object Name,@{Name='ID'"):
-			return jsonResult(t, checkpointVM{Name: testCheckpointVMName, ID: testCheckpointVMID, State: 3}), nil, true
+			return jsonResult(t, checkpointVM{Name: testCheckpointVMName, ID: testCheckpointVMID, State: 2}), nil, true
 		case strings.Contains(script, "Restore-VMSnapshot"):
 			return core.LocalCommandResult{}, nil, true
 		case strings.Contains(script, "Select-Object -ExpandProperty IPAddresses"):
 			return core.LocalCommandResult{Stdout: `["192.0.2.45"]`}, nil, true
+		case strings.Contains(script, "ConvertTo-Json -InputObject $items"):
+			return core.LocalCommandResult{Stdout: "[]"}, nil, true
+		case strings.Contains(script, "Add-VMHardDiskDrive") && strings.Contains(script, cacheVHDPath):
+			return jsonResult(t, hypervCacheAttachOutput{ControllerLocation: 1}), nil, true
+		case strings.Contains(script, "Invoke-Command"):
+			return core.LocalCommandResult{}, nil, true
 		default:
 			return core.LocalCommandResult{}, nil, false
 		}
 	}
 	b := testBackend(runner)
+	b.cacheRoot = t.TempDir()
 	b.sshReady = func(context.Context, *SSHTarget, io.Writer, string, time.Duration) error { return nil }
 	persistCheckpointSource(t, b)
+	cacheVolume := core.CacheVolumeConfig{Key: "restore-cache", Path: `C:\crabbox-cache\nuget`, SizeGB: 32, Required: true}
+	writeTestHyperVCacheVolume(t, b, cacheVolume, hypervCacheMetadata{
+		Version:    hypervCacheMetadataVersion,
+		Key:        cacheVolume.Key,
+		Target:     "windows/normal",
+		Filesystem: "ntfs",
+		DiskID:     "11111111-2222-3333-4444-555555555555",
+		SizeGB:     32,
+	})
+	cacheVHDPath = b.cacheVolumePaths(cacheVolume.Key).vhd
+	if err := core.UpdateLeaseClaimCacheVolumes(testCheckpointLeaseID, core.CacheVolumeStickyDiskSpecs([]core.CacheVolumeConfig{cacheVolume})); err != nil {
+		t.Fatal(err)
+	}
 
 	lease, err := b.restoreNativeCheckpoint(context.Background(), core.NativeCheckpointRestoreRequest{
 		Config:  b.cfg,
@@ -258,6 +431,15 @@ func TestRestoreNativeCheckpointRefreshesClaimEndpoint(t *testing.T) {
 	}
 	if claim.SSHHost != "192.0.2.45" {
 		t.Fatalf("claim SSH host=%q", claim.SSHHost)
+	}
+	detachIndex := findCallIndex(runner.calls, "Remove-VMHardDiskDrive")
+	restoreIndex := findCallIndex(runner.calls, "Restore-VMSnapshot")
+	reattachIndex := findCallIndexAll(runner.calls, "Add-VMHardDiskDrive", cacheVHDPath)
+	if detachIndex < 0 || restoreIndex <= detachIndex || reattachIndex <= restoreIndex {
+		t.Fatalf("restore cache order detach=%d restore=%d reattach=%d", detachIndex, restoreIndex, reattachIndex)
+	}
+	if len(claim.CacheVolumes) != 1 || claim.CacheVolumes[0] != cacheVolume.Key+":"+cacheVolume.Path {
+		t.Fatalf("restored claim cache volumes=%#v", claim.CacheVolumes)
 	}
 }
 
@@ -406,6 +588,7 @@ func TestForkNativeCheckpointCreatesFreshIdentityAndConnectsNetworkLast(t *testi
 	setCheckpointTestState(t)
 	paths, metadata := createCheckpointArtifact(t)
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	var cacheVHDPath string
 	runner.respond = func(req core.LocalCommandRequest) (core.LocalCommandResult, error, bool) {
 		script := commandScript(req)
 		switch {
@@ -415,11 +598,31 @@ func TestForkNativeCheckpointCreatesFreshIdentityAndConnectsNetworkLast(t *testi
 			return core.LocalCommandResult{Stdout: `["192.0.2.55"]`}, nil, true
 		case strings.Contains(script, "Invoke-Command"):
 			return core.LocalCommandResult{}, nil, true
+		case strings.Contains(script, "ConvertTo-Json -InputObject $items"):
+			return core.LocalCommandResult{Stdout: "[]"}, nil, true
+		case strings.Contains(script, "Add-VMHardDiskDrive") && strings.Contains(script, cacheVHDPath):
+			return jsonResult(t, hypervCacheAttachOutput{ControllerLocation: 2}), nil, true
 		default:
 			return core.LocalCommandResult{}, nil, false
 		}
 	}
 	b := testBackend(runner)
+	b.cacheRoot = t.TempDir()
+	cacheVolume := core.CacheVolumeConfig{
+		Key:      "fork-nuget-cache",
+		Path:     `D:\crabbox-cache\nuget`,
+		Required: true,
+	}
+	b.cfg.Cache.Volumes = []core.CacheVolumeConfig{cacheVolume}
+	writeTestHyperVCacheVolume(t, b, cacheVolume, hypervCacheMetadata{
+		Version:    hypervCacheMetadataVersion,
+		Key:        cacheVolume.Key,
+		Target:     "windows/normal",
+		Filesystem: "ntfs",
+		DiskID:     "11111111-2222-3333-4444-555555555555",
+		SizeGB:     80,
+	})
+	cacheVHDPath = b.cacheVolumePaths(cacheVolume.Key).vhd
 	b.ensureLeaseKey = func(Config, string) (string, string, error) {
 		keyPath := filepath.Join(t.TempDir(), "id_ed25519")
 		if err := os.WriteFile(keyPath, []byte("private"), 0o600); err != nil {
@@ -455,11 +658,29 @@ func TestForkNativeCheckpointCreatesFreshIdentityAndConnectsNetworkLast(t *testi
 	if rotationIndex < 0 || connectIndex <= rotationIndex {
 		t.Fatalf("network was not connected after identity rotation: rotation=%d connect=%d", rotationIndex, connectIndex)
 	}
+	importIndex := findCallIndex(runner.calls, "Import-VM")
+	excludeIndex := findCallIndex(runner.calls, "GetFileName($_.Path)")
+	cacheAttachIndex := findCallIndexAll(runner.calls, "Add-VMHardDiskDrive", cacheVHDPath)
+	if excludeIndex <= importIndex || cacheAttachIndex <= excludeIndex {
+		t.Fatalf("fork cache order import=%d exclude=%d attach=%d", importIndex, excludeIndex, cacheAttachIndex)
+	}
+	excludeScript := commandScript(runner.calls[excludeIndex])
+	if strings.Contains(excludeScript, "ControllerLocation") || !strings.Contains(excludeScript, `^cache-[0-9a-fA-F]{32}`) {
+		t.Fatalf("fork exclusion was not limited to provider cache disk names: %s", excludeScript)
+	}
 	rotationScript := commandScript(runner.calls[rotationIndex])
 	for _, expected := range []string{"ssh-ed25519 AAAATEST", "ssh_host_*", "Tailscale", "vnc.password"} {
 		if !strings.Contains(rotationScript, expected) {
 			t.Fatalf("identity rotation missing %s: %s", expected, rotationScript)
 		}
+	}
+	claim, ok, err := core.ReadLeaseClaimWithPresence(lease.LeaseID)
+	if err != nil || !ok {
+		t.Fatalf("read fork claim ok=%v err=%v", ok, err)
+	}
+	wantCache := cacheVolume.Key + ":" + cacheVolume.Path
+	if len(claim.CacheVolumes) != 1 || claim.CacheVolumes[0] != wantCache {
+		t.Fatalf("fork claim cache volumes=%#v want %q", claim.CacheVolumes, wantCache)
 	}
 }
 
@@ -603,7 +824,7 @@ func persistCheckpointSource(t *testing.T, b *backend) {
 	server := checkpointSourceServer(b)
 	lease := LeaseTarget{Server: server, LeaseID: testCheckpointLeaseID}
 	req := AcquireRequest{Repo: core.Repo{Root: t.TempDir()}}
-	if err := persistLease(testCheckpointLeaseID, "checkpoint-source", testCheckpointVMName, cfg, req, lease); err != nil {
+	if err := persistLease(testCheckpointLeaseID, "checkpoint-source", testCheckpointVMName, cfg, req, lease, nil); err != nil {
 		t.Fatalf("persist source lease: %v", err)
 	}
 }
@@ -688,6 +909,23 @@ func findScript(calls []core.LocalCommandRequest, needle string) string {
 func findCallIndex(calls []core.LocalCommandRequest, needle string) int {
 	for i, call := range calls {
 		if strings.Contains(commandScript(call), needle) {
+			return i
+		}
+	}
+	return -1
+}
+
+func findCallIndexAll(calls []core.LocalCommandRequest, needles ...string) int {
+	for i, call := range calls {
+		script := commandScript(call)
+		matches := true
+		for _, needle := range needles {
+			if !strings.Contains(script, needle) {
+				matches = false
+				break
+			}
+		}
+		if matches {
 			return i
 		}
 	}

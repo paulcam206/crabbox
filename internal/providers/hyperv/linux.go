@@ -79,7 +79,7 @@ func (b *backend) acquireLinux(ctx context.Context, req AcquireRequest) (LeaseTa
 		Server:  b.serverFromInstance(hypervVM{Name: name, State: 2}, claim, cfg),
 		LeaseID: leaseID,
 	}
-	if err := persistLease(leaseID, slug, name, cfg, req, provisional); err != nil {
+	if err := persistLease(leaseID, slug, name, cfg, req, provisional, nil); err != nil {
 		return LeaseTarget{}, fmt.Errorf("persist hyperv lease before bootstrap: %w", err)
 	}
 	cleanupKey = false
@@ -114,7 +114,11 @@ func (b *backend) acquireLinux(ctx context.Context, req AcquireRequest) (LeaseTa
 	if err := b.detachAndRemoveNoCloudSeed(ctx, name); err != nil {
 		return LeaseTarget{}, errors.Join(err, cleanupFailedLease())
 	}
-	if err := persistLease(leaseID, slug, name, cfg, req, lease); err != nil {
+	attachedCaches, err := b.attachConfiguredCacheVolumes(ctx, name, cfg, lease)
+	if err != nil {
+		return LeaseTarget{}, errors.Join(err, cleanupFailedLease())
+	}
+	if err := persistLease(leaseID, slug, name, cfg, req, lease, core.CacheVolumeStickyDiskSpecs(attachedCaches)); err != nil {
 		return LeaseTarget{}, errors.Join(err, cleanupFailedLease())
 	}
 	cleanupKey = false

@@ -316,6 +316,39 @@ func (b *backend) createNativeCheckpoint(ctx context.Context, req core.NativeChe
 	if source.State == hypervMissingState || source.ID == "" {
 		return result, exit(4, "Hyper-V checkpoint source VM %s no longer exists", sourceName)
 	}
+	sourceClaim, ok, err := resolveLeaseClaimForProvider(req.LeaseID, providerName)
+	if err != nil {
+		return result, err
+	}
+	if !ok {
+		return result, exit(4, "Hyper-V checkpoint source lease %s has no local claim", req.LeaseID)
+	}
+	if source.State != 2 && len(sourceClaim.CacheVolumes) > 0 {
+		return result, exit(2, "Hyper-V cache-backed checkpoint source %s must be running; resume the lease before creating a checkpoint", sourceName)
+	}
+	cfg := b.configForRun()
+	switch target := strings.TrimSpace(firstNonBlank(req.Target.TargetOS, req.Server.Labels["target"])); target {
+	case targetLinux, targetWindows:
+		cfg.TargetOS = target
+	}
+	if mode := strings.TrimSpace(firstNonBlank(req.Target.WindowsMode, req.Server.Labels["windows_mode"])); mode != "" {
+		cfg.WindowsMode = mode
+	}
+	if user := strings.TrimSpace(req.Server.Labels["ssh_user"]); user != "" {
+		cfg.HyperV.User = user
+		cfg.SSHUser = user
+	}
+	if workRoot := strings.TrimSpace(req.Server.Labels["work_root"]); workRoot != "" {
+		cfg.HyperV.WorkRoot = workRoot
+		cfg.WorkRoot = workRoot
+	}
+	detachedCaches, detachErr := b.detachLeaseCacheVolumes(ctx, sourceName, req.LeaseID, cfg, req.Target, true)
+	if detachErr != nil {
+		return result, errors.Join(detachErr, b.restoreDetachedCacheVolumes(sourceName, cfg, req.Target, detachedCaches))
+	}
+	defer func() {
+		err = errors.Join(err, b.restoreDetachedCacheVolumes(sourceName, cfg, req.Target, detachedCaches))
+	}()
 	paths, err := checkpointArtifactForCreate(req.ArtifactDir)
 	if err != nil {
 		return result, err
@@ -542,7 +575,7 @@ func newHyperVCheckpointName(requested, leaseID string) (string, error) {
 	return trimmed + "-" + hex.EncodeToString(suffix[:]), nil
 }
 
-func (b *backend) restoreNativeCheckpoint(ctx context.Context, req core.NativeCheckpointRestoreRequest) (LeaseTarget, error) {
+func (b *backend) restoreNativeCheckpoint(ctx context.Context, req core.NativeCheckpointRestoreRequest) (lease LeaseTarget, err error) {
 	if req.Record.Kind != hypervCheckpointKind {
 		return LeaseTarget{}, exit(2, "Hyper-V cannot restore checkpoint kind %q", req.Record.Kind)
 	}
@@ -617,6 +650,19 @@ func (b *backend) restoreNativeCheckpoint(ctx context.Context, req core.NativeCh
 	if vm.State == hypervMissingState || !strings.EqualFold(vm.ID, sourceID) {
 		return LeaseTarget{}, exit(4, "Hyper-V source VM identity no longer matches checkpoint %s", req.Record.ImageID)
 	}
+	if vm.State != 2 && len(claim.CacheVolumes) > 0 {
+		return LeaseTarget{}, exit(2, "Hyper-V cache-backed restore source %s must be running; resume the lease before restoring a checkpoint", sourceName)
+	}
+	detachedCaches, detachErr := b.detachLeaseCacheVolumes(ctx, sourceName, sourceLease, cfg, reservationTarget, true)
+	if detachErr != nil {
+		return LeaseTarget{}, errors.Join(detachErr, b.restoreDetachedCacheVolumes(sourceName, cfg, reservationTarget, detachedCaches))
+	}
+	cacheRestorePending := len(detachedCaches) > 0
+	defer func() {
+		if cacheRestorePending {
+			err = errors.Join(err, b.restoreCheckpointCachesAfterFailure(sourceName, cfg, reservationTarget, detachedCaches))
+		}
+	}()
 	script := fmt.Sprintf(
 		`$ErrorActionPreference='Stop'; `+
 			`$vm=Get-VM -Name '%s' -ErrorAction Stop; `+
@@ -656,15 +702,37 @@ func (b *backend) restoreNativeCheckpoint(ctx context.Context, req core.NativeCh
 	if err != nil {
 		return LeaseTarget{}, err
 	}
-	lease, err := b.prepareLease(ctx, cfg, hypervVM{Name: sourceName, State: 2}, ip, claim, true)
+	lease, err = b.prepareLease(ctx, cfg, hypervVM{Name: sourceName, State: 2}, ip, claim, true)
 	if err != nil {
 		return LeaseTarget{}, err
+	}
+	cacheErr := b.restoreDetachedCacheVolumes(sourceName, cfg, lease.SSH, detachedCaches)
+	cacheRestorePending = false
+	if cacheErr != nil {
+		return LeaseTarget{}, cacheErr
 	}
 	if err := claimLeaseForRepoProviderScopePondEndpoint(sourceLease, claim.Slug, providerName, instanceScope(sourceName), cfg.Pond, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, lease.Server, lease.SSH); err != nil {
 		return LeaseTarget{}, err
 	}
 	rollbackClaim = false
 	return lease, nil
+}
+
+func (b *backend) restoreCheckpointCachesAfterFailure(vmName string, cfg Config, target SSHTarget, volumes []hypervDetachedCacheVolume) error {
+	if len(volumes) == 0 {
+		return nil
+	}
+	restoreCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	startScript := fmt.Sprintf(`$vm=Get-VM -Name '%s' -ErrorAction SilentlyContinue; if ($vm -and $vm.State -ne 'Running') { Start-VM -VM $vm -ErrorAction Stop }`, escapePSString(vmName))
+	result, err := b.powershell(restoreCtx, startScript)
+	if err != nil {
+		return errors.Join(commandError("start Hyper-V VM for cache restoration", result, err), releaseDetachedCacheVolumeLocks(volumes))
+	}
+	if err := b.waitGuestReady(restoreCtx, vmName, cfg.HyperV.User); err != nil {
+		return errors.Join(err, releaseDetachedCacheVolumeLocks(volumes))
+	}
+	return b.restoreDetachedCacheVolumes(vmName, cfg, target, volumes)
 }
 
 func (b *backend) ForkNativeCheckpoint(ctx context.Context, req core.NativeCheckpointForkLifecycleRequest) (lease LeaseTarget, err error) {
@@ -726,7 +794,7 @@ func (b *backend) ForkNativeCheckpoint(ctx context.Context, req core.NativeCheck
 	claim := core.LeaseClaim{LeaseID: leaseID, Slug: slug, Provider: providerName, ProviderScope: instanceScope(name), Labels: labels}
 	provisional := LeaseTarget{Server: b.serverFromInstance(hypervVM{Name: name, State: 2}, claim, cfg), LeaseID: leaseID}
 	acquireReq := AcquireRequest{Repo: req.Repo, Keep: req.Keep, Reclaim: req.Reclaim, RequestedSlug: req.RequestedSlug}
-	if err := persistLease(leaseID, slug, name, cfg, acquireReq, provisional); err != nil {
+	if err := persistLease(leaseID, slug, name, cfg, acquireReq, provisional, nil); err != nil {
 		removeStoredTestboxKey(leaseID)
 		return lease, fmt.Errorf("persist Hyper-V checkpoint fork before import: %w", err)
 	}
@@ -748,6 +816,9 @@ func (b *backend) ForkNativeCheckpoint(ctx context.Context, req core.NativeCheck
 	}
 	if strings.EqualFold(importedID, strings.TrimSpace(req.Record.Metadata[checkpointMetadataSourceVMID])) {
 		return lease, exit(2, "Import-VM did not generate a fresh Hyper-V VM identity")
+	}
+	if err := b.detachInheritedForkDisks(ctx, name); err != nil {
+		return lease, err
 	}
 	if err := b.waitGuestReady(ctx, name, cfg.HyperV.User); err != nil {
 		return lease, fmt.Errorf("forked guest did not become reachable over PowerShell Direct: %w", err)
@@ -773,7 +844,11 @@ func (b *backend) ForkNativeCheckpoint(ctx context.Context, req core.NativeCheck
 	if err != nil {
 		return lease, err
 	}
-	if err := persistLease(leaseID, slug, name, cfg, acquireReq, lease); err != nil {
+	attachedCaches, err := b.attachConfiguredCacheVolumes(ctx, name, cfg, lease)
+	if err != nil {
+		return lease, err
+	}
+	if err := persistLease(leaseID, slug, name, cfg, acquireReq, lease, core.CacheVolumeStickyDiskSpecs(attachedCaches)); err != nil {
 		return lease, err
 	}
 	committed = true

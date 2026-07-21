@@ -104,6 +104,7 @@ func TestProviderSpecAndAliases(t *testing.T) {
 			core.FeatureBrowser,
 			core.FeatureCleanup,
 			core.FeaturePauseResume,
+			core.FeatureCacheVolume,
 			core.FeatureCheckpoint,
 			core.FeatureFork,
 			core.FeatureRestore,
@@ -131,6 +132,7 @@ func TestProviderFeaturesAreTargetAware(t *testing.T) {
 		core.FeatureBrowser,
 		core.FeatureCleanup,
 		core.FeaturePauseResume,
+		core.FeatureCacheVolume,
 	} {
 		if !linux.Has(feature) || !windows.Has(feature) {
 			t.Fatalf("feature %s missing from linux=%v or windows=%v", feature, linux, windows)
@@ -1077,7 +1079,8 @@ func TestPersistLeaseWritesClaimAndEndpointAtomically(t *testing.T) {
 
 	req := AcquireRequest{}
 	req.Repo.Root = t.TempDir()
-	if err := persistLease("cbx_atomic123456", "atomslug", "crabbox-atom-1234", cfg, req, lease); err != nil {
+	cacheVolumes := []string{`nuget-cache:C:\crabbox-cache\nuget`}
+	if err := persistLease("cbx_atomic123456", "atomslug", "crabbox-atom-1234", cfg, req, lease, cacheVolumes); err != nil {
 		t.Fatalf("persistLease: %v", err)
 	}
 	t.Cleanup(func() { removeLeaseClaim("cbx_atomic123456") })
@@ -1097,6 +1100,9 @@ func TestPersistLeaseWritesClaimAndEndpointAtomically(t *testing.T) {
 	}
 	if found.SSHHost != "172.20.0.9" {
 		t.Fatalf("claim SSHHost=%q want 172.20.0.9 (endpoint must be in the same write as the claim)", found.SSHHost)
+	}
+	if !reflect.DeepEqual(found.CacheVolumes, cacheVolumes) {
+		t.Fatalf("claim CacheVolumes=%#v want %#v", found.CacheVolumes, cacheVolumes)
 	}
 	if instanceNameFromClaim(*found) != "crabbox-atom-1234" {
 		t.Fatalf("claim instance=%q want crabbox-atom-1234", instanceNameFromClaim(*found))
@@ -1123,7 +1129,7 @@ func TestPersistLeaseFailureLeavesNoStaleClaim(t *testing.T) {
 
 	req := AcquireRequest{}
 	req.Repo.Root = t.TempDir()
-	if err := persistLease("cbx_atomfail12345", "atomfail", "crabbox-atom-fail", cfg, req, lease); err == nil {
+	if err := persistLease("cbx_atomfail12345", "atomfail", "crabbox-atom-fail", cfg, req, lease, nil); err == nil {
 		t.Fatal("persistLease should fail when the state directory is unwritable")
 	}
 	info, err := os.Stat(blocker)
@@ -1153,7 +1159,7 @@ func TestResolveStatusOnlyAllowsRetainedLeaseWithoutIP(t *testing.T) {
 		Server:  b.serverFromInstance(hypervVM{Name: name, State: 2}, claim, cfg),
 		LeaseID: claim.LeaseID,
 	}
-	if err := persistLease(claim.LeaseID, claim.Slug, name, cfg, req, lease); err != nil {
+	if err := persistLease(claim.LeaseID, claim.Slug, name, cfg, req, lease, nil); err != nil {
 		t.Fatalf("persistLease: %v", err)
 	}
 	t.Cleanup(func() { removeLeaseClaim(claim.LeaseID) })
@@ -1243,7 +1249,7 @@ func TestReleasePrunesClaimAndKeyWhenVMIsMissing(t *testing.T) {
 		LeaseID: leaseID,
 	}
 	req := AcquireRequest{Repo: core.Repo{Root: t.TempDir()}}
-	if err := persistLease(leaseID, claim.Slug, name, cfg, req, lease); err != nil {
+	if err := persistLease(leaseID, claim.Slug, name, cfg, req, lease, nil); err != nil {
 		t.Fatalf("persistLease: %v", err)
 	}
 	baseVHD := filepath.Join(hypervVHDDir(), name+".vhdx")
@@ -1322,7 +1328,7 @@ func TestCleanupMissingClaimRemovesDeterministicStorage(t *testing.T) {
 		Server:  b.serverFromInstance(hypervVM{Name: name, State: 2}, claim, cfg),
 		LeaseID: leaseID,
 	}
-	if err := persistLease(leaseID, claim.Slug, name, cfg, AcquireRequest{Repo: core.Repo{Root: t.TempDir()}}, lease); err != nil {
+	if err := persistLease(leaseID, claim.Slug, name, cfg, AcquireRequest{Repo: core.Repo{Root: t.TempDir()}}, lease, nil); err != nil {
 		t.Fatalf("persistLease: %v", err)
 	}
 	baseVHD := filepath.Join(hypervVHDDir(), name+".vhdx")
@@ -1379,7 +1385,7 @@ func TestCleanupMissingKeepClaimPreservesStorage(t *testing.T) {
 		Server:  b.serverFromInstance(hypervVM{Name: name, State: 2}, claim, cfg),
 		LeaseID: leaseID,
 	}
-	if err := persistLease(leaseID, claim.Slug, name, cfg, AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, Keep: true}, lease); err != nil {
+	if err := persistLease(leaseID, claim.Slug, name, cfg, AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, Keep: true}, lease, nil); err != nil {
 		t.Fatalf("persistLease: %v", err)
 	}
 	baseVHD := filepath.Join(hypervVHDDir(), name+".vhdx")
