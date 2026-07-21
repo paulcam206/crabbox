@@ -45,6 +45,10 @@ func cloudInit(cfg Config, publicKey string) string {
 	readyChecks := cloudInitOptionalReadyChecks(cfg)
 	writeFiles := cloudInitOptionalWriteFiles(cfg)
 	bootstrap := cloudInitOptionalBootstrap(cfg)
+	finalReadyCheck := "    crabbox-ready"
+	if cfg.Tailscale.ScrubCloudInitSecrets {
+		finalReadyCheck = "    true"
+	}
 	yamlSSHUser := yamlInlineString(cfg.SSHUser)
 	yamlPublicKey := yamlInlineString(publicKey)
 	shellSSHUser := shellQuote(cfg.SSHUser)
@@ -106,9 +110,9 @@ runcmd:
     timeout 30s systemctl restart ssh || timeout 30s systemctl restart ssh.socket || true
 %[8]s
     touch /var/lib/crabbox/bootstrapped
-    crabbox-ready
+%[9]s
     BOOT
-`, yamlSSHUser, yamlPublicKey, shellWorkRoot, portLines, readyChecks, writeFiles, shellSSHUser, bootstrap)
+`, yamlSSHUser, yamlPublicKey, shellWorkRoot, portLines, readyChecks, writeFiles, shellSSHUser, bootstrap, finalReadyCheck)
 }
 
 func CloudInitUserData(cfg Config, publicKey string) string {
@@ -732,7 +736,10 @@ func cloudInitOptionalReadyChecks(cfg Config) string {
 	var b strings.Builder
 	if cfg.Tailscale.Enabled {
 		b.WriteString("      test -s /var/lib/crabbox/tailscale-ipv4\n")
-		b.WriteString("      grep -Eq '^100\\.' /var/lib/crabbox/tailscale-ipv4\n")
+		b.WriteString("      awk -F. 'NF == 4 { ok=1; for (i=1; i<=4; i++) if ($i !~ /^[0-9]+$/ || $i < 0 || $i > 255) ok=0 } END { exit ok ? 0 : 1 }' /var/lib/crabbox/tailscale-ipv4\n")
+	}
+	if cfg.Tailscale.ScrubCloudInitSecrets {
+		b.WriteString("      test ! -e /usr/local/sbin/crabbox-cloud-init-secret-cleanup\n")
 	}
 	if cfg.Desktop {
 		if isWaylandDesktopEnv(cfg.DesktopEnv) {
@@ -1650,14 +1657,18 @@ func cloudInitTailscaleBootstrap(cfg Config) string {
 	sshUserGroup := shellQuote(sshUser)
 	sshUserChown := shellQuote(sshUser + ":" + sshUser)
 	tags := strings.Join(cfg.Tailscale.Tags, ",")
+	exitNode := strings.TrimSpace(cfg.Tailscale.ExitNode)
+	joinExitNode := exitNode
+	if cfg.Tailscale.DeferExitNode {
+		joinExitNode = ""
+	}
 	tailscaleUpArgs := []string{
 		"--auth-key=file:/dev/stdin",
 		"--hostname=" + shellQuote(hostname),
 		"--advertise-tags=" + shellQuote(tags),
 	}
-	exitNode := strings.TrimSpace(cfg.Tailscale.ExitNode)
-	if exitNode != "" {
-		tailscaleUpArgs = append(tailscaleUpArgs, "--exit-node="+shellQuote(exitNode))
+	if joinExitNode != "" {
+		tailscaleUpArgs = append(tailscaleUpArgs, "--exit-node="+shellQuote(joinExitNode))
 		if cfg.Tailscale.ExitNodeAllowLANAccess {
 			tailscaleUpArgs = append(tailscaleUpArgs, "--exit-node-allow-lan-access")
 		}
@@ -1676,7 +1687,15 @@ func cloudInitTailscaleBootstrap(cfg Config) string {
 		loginServerExport = "TS_LOGIN_SERVER=" + shellQuote(controlURL) + "\n    "
 	}
 	loginServerFlag := `${TS_LOGIN_SERVER:+--login-server="$TS_LOGIN_SERVER"}`
-	tailscaleUpScript := `    ` + cloudInitTailscaleInstallBootstrap() + `
+	tailscaleUpScript := `    `
+	if cfg.Tailscale.ScrubCloudInitSecrets {
+		tailscaleUpScript += cloudInitTailscaleSecretCleanupBootstrap() + "\n    "
+	}
+	if cfg.Tailscale.ResetIdentityBeforeUp {
+		resetScript := strings.ReplaceAll(TailscaleIdentityResetScript(targetLinux, ""), "\n", "\n    ")
+		tailscaleUpScript += resetScript + "\n    "
+	}
+	tailscaleUpScript += cloudInitTailscaleInstallBootstrap() + `
     systemctl enable --now tailscaled || service tailscaled start || true
     if command -v systemctl >/dev/null 2>&1; then
       systemctl disable crabbox-tailscale-logout.service >/dev/null 2>&1 || true
@@ -1714,6 +1733,41 @@ func cloudInitTailscaleBootstrap(cfg Config) string {
 		tailscaleUpScript += "\n" + cloudInitPondHostsBootstrap(cfg.Pond)
 	}
 	return tailscaleUpScript
+}
+
+func cloudInitTailscaleSecretCleanupBootstrap() string {
+	return `cat >/usr/local/sbin/crabbox-cloud-init-secret-cleanup <<'CLOUDBOX_SECRET_CLEANUP'
+    #!/usr/bin/env sh
+    set -eu
+    cloud_instance_dir="$(readlink -f /var/lib/cloud/instance 2>/dev/null || true)"
+    install -d -m 0755 /etc/cloud
+    : >/etc/cloud/cloud-init.disabled
+    case "$cloud_instance_dir" in
+      /var/lib/cloud/instances/*)
+        for cloud_secret_path in "$cloud_instance_dir/user-data.txt" "$cloud_instance_dir/user-data.txt.i" "$cloud_instance_dir/cloud-config.txt" "$cloud_instance_dir/scripts/runcmd" "$cloud_instance_dir/obj.pkl"; do
+          if [ -e "$cloud_secret_path" ]; then
+            chmod u+w "$cloud_secret_path" 2>/dev/null || true
+            : >"$cloud_secret_path" 2>/dev/null || true
+            rm -f "$cloud_secret_path" 2>/dev/null || true
+          fi
+        done
+        ;;
+    esac
+    for cloud_seed_path in /var/lib/cloud/seed/nocloud/user-data /var/lib/cloud/seed/nocloud-net/user-data; do
+      if [ -e "$cloud_seed_path" ]; then
+        chmod u+w "$cloud_seed_path" 2>/dev/null || true
+        : >"$cloud_seed_path" 2>/dev/null || true
+        rm -f "$cloud_seed_path" 2>/dev/null || true
+      fi
+    done
+    rm -f /usr/local/sbin/crabbox-cloud-init-secret-cleanup
+    CLOUDBOX_SECRET_CLEANUP
+    chmod 0700 /usr/local/sbin/crabbox-cloud-init-secret-cleanup
+    if command -v cloud-init >/dev/null 2>&1; then
+      nohup sh -c 'cloud-init status --wait >/dev/null 2>&1 || true; /usr/local/sbin/crabbox-cloud-init-secret-cleanup' >/dev/null 2>&1 &
+    else
+      nohup sh -c 'sleep 180; /usr/local/sbin/crabbox-cloud-init-secret-cleanup' >/dev/null 2>&1 &
+    fi`
 }
 
 func cloudInitTailscaleInstallBootstrap() string {

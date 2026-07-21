@@ -420,6 +420,10 @@ func TestForkNativeCheckpointCreatesFreshIdentityAndConnectsNetworkLast(t *testi
 		}
 	}
 	b := testBackend(runner)
+	b.cfg.Tailscale.Enabled = true
+	b.cfg.Tailscale.AuthKey = "fixture-only-invalid-value"
+	b.cfg.Tailscale.Hostname = "crabbox-fork"
+	b.cfg.Tailscale.Tags = []string{"tag:crabbox"}
 	b.ensureLeaseKey = func(Config, string) (string, string, error) {
 		keyPath := filepath.Join(t.TempDir(), "id_ed25519")
 		if err := os.WriteFile(keyPath, []byte("private"), 0o600); err != nil {
@@ -460,6 +464,14 @@ func TestForkNativeCheckpointCreatesFreshIdentityAndConnectsNetworkLast(t *testi
 		if !strings.Contains(rotationScript, expected) {
 			t.Fatalf("identity rotation missing %s: %s", expected, rotationScript)
 		}
+	}
+	tailscaleIndex := findCallIndex(runner.calls, "$upArgs.Add('up')")
+	if tailscaleIndex <= connectIndex {
+		t.Fatalf("fork Tailscale join did not run after network connection: connect=%d tailscale=%d", connectIndex, tailscaleIndex)
+	}
+	tailscaleCommand := commandScript(runner.calls[tailscaleIndex])
+	if strings.Contains(tailscaleCommand, b.cfg.Tailscale.AuthKey) {
+		t.Fatal("fork Tailscale auth key leaked into host argv")
 	}
 }
 
