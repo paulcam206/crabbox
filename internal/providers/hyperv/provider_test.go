@@ -87,11 +87,18 @@ func TestProviderSpecAndAliases(t *testing.T) {
 		t.Fatalf("Name=%q want %s", p.Name(), providerName)
 	}
 	want := core.ProviderSpec{
-		Name:        providerName,
-		Family:      "local-vm",
-		Kind:        core.ProviderKindSSHLease,
-		Targets:     []core.TargetSpec{{OS: core.TargetWindows, WindowsMode: core.WindowsModeNormal}},
-		Features:    core.FeatureSet{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureCleanup, core.FeaturePauseResume},
+		Name:    providerName,
+		Family:  "local-vm",
+		Kind:    core.ProviderKindSSHLease,
+		Targets: []core.TargetSpec{{OS: core.TargetWindows, WindowsMode: core.WindowsModeNormal}},
+		Features: core.FeatureSet{
+			core.FeatureSSH,
+			core.FeatureCrabboxSync,
+			core.FeatureDesktop,
+			core.FeatureBrowser,
+			core.FeatureCleanup,
+			core.FeaturePauseResume,
+		},
 		Coordinator: core.CoordinatorNever,
 	}
 	if spec := p.Spec(); !reflect.DeepEqual(spec, want) {
@@ -1152,7 +1159,7 @@ func TestReleasePrunesClaimAndKeyWhenVMIsMissing(t *testing.T) {
 		Slug:          "missing-vm",
 		Provider:      providerName,
 		ProviderScope: instanceScope(name),
-		Labels:        map[string]string{"instance": name, "lease": leaseID},
+		Labels:        map[string]string{"instance": name, "lease": leaseID, "desktop": "true", "browser": "true"},
 	}
 	lease := LeaseTarget{
 		Server:  b.serverFromInstance(hypervVM{Name: name, State: 2}, claim, cfg),

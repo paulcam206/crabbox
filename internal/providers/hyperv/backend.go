@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -37,6 +38,8 @@ type backend struct {
 	resumeSSHProbeTimeout  time.Duration
 	resumeIPStableWindow   time.Duration
 	resumePollInterval     time.Duration
+	waitSSHReady           func(context.Context, *SSHTarget, io.Writer, string, time.Duration) error
+	waitWindowsVNC         func(context.Context, *SSHTarget, io.Writer, time.Duration) error
 }
 
 var hypervHostOS = runtime.GOOS
@@ -71,6 +74,8 @@ func newBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
 		sshReady: func(ctx context.Context, target *SSHTarget, phase string, timeout time.Duration) error {
 			return waitForSSHReady(ctx, target, rt.Stderr, phase, timeout)
 		},
+		waitSSHReady:   waitForSSHReady,
+		waitWindowsVNC: core.WaitForManagedWindowsLoopbackVNC,
 	}
 }
 
@@ -138,6 +143,7 @@ func (b *backend) acquireWindows(ctx context.Context, req AcquireRequest) (Lease
 		return LeaseTarget{}, exit(2, "provider=%s requires a Windows host with Hyper-V enabled", providerName)
 	}
 	cfg := b.configForRun()
+	cfg = windowsCapabilityConfig(cfg, req.Options)
 	if cfg.HyperV.Image == "" {
 		return LeaseTarget{}, exit(2, "provider=%s requires --hyperv-image (path to a Windows VHDX template with a known administrator password; the provider installs OpenSSH if missing)", providerName)
 	}
@@ -195,7 +201,7 @@ func (b *backend) acquireWindows(ctx context.Context, req AcquireRequest) (Lease
 	}()
 	cfg.SSHKey = keyPath
 	name := leaseProviderName(leaseID, slug)
-	labels := directLeaseLabels(cfg, leaseID, slug, providerName, "", req.Keep, time.Now().UTC())
+	labels := provisionalWindowsCapabilityLabels(cfg, leaseID, slug, req.Keep, time.Now().UTC())
 	labels["instance"] = name
 	labels["image"] = cfg.HyperV.Image
 	labels["ssh_user"] = cfg.HyperV.User
@@ -260,8 +266,16 @@ func (b *backend) acquireWindows(ctx context.Context, req AcquireRequest) (Lease
 	if err := b.ensureGit(ctx, name, cfg.HyperV.User); err != nil {
 		return LeaseTarget{}, errors.Join(fmt.Errorf("guest git setup failed: %w", err), cleanupFailedLease())
 	}
+	if cfg.Desktop {
+		if err := b.bootstrapWindowsDesktop(ctx, name, cfg.HyperV.User); err != nil {
+			return LeaseTarget{}, errors.Join(err, cleanupFailedLease())
+		}
+	}
 	lease, err := b.prepareLease(ctx, cfg, hypervVM{Name: name, State: 2}, ip, claim, true)
 	if err != nil {
+		return LeaseTarget{}, errors.Join(err, cleanupFailedLease())
+	}
+	if err := b.finalizeWindowsCapabilities(ctx, cfg, name, &lease); err != nil {
 		return LeaseTarget{}, errors.Join(err, cleanupFailedLease())
 	}
 	if err := persistLease(leaseID, slug, name, cfg, req, lease); err != nil {
@@ -1033,7 +1047,7 @@ func (b *backend) prepareLease(ctx context.Context, cfg Config, inst hypervVM, i
 	target.Port = sshPort
 	target.FallbackPorts = []string{}
 	if wait {
-		if err := b.sshReady(ctx, &target, "hyperv ssh", bootstrapWaitTimeout(cfg)); err != nil {
+		if err := b.waitSSHReady(ctx, &target, b.rt.Stderr, "hyperv ssh", bootstrapWaitTimeout(cfg)); err != nil {
 			return LeaseTarget{}, err
 		}
 		server.Status = "ready"
