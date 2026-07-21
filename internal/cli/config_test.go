@@ -7092,6 +7092,8 @@ func TestTailscaleEnvOverrides(t *testing.T) {
 	clearConfigEnv(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("APPDATA", filepath.Join(home, "AppData", "Roaming"))
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("CRABBOX_CONFIG", "")
 	t.Setenv("CRABBOX_PROVIDER", "hetzner")

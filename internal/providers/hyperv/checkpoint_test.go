@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -248,43 +250,117 @@ func TestCreateNativeCheckpointDetachesAndRestoresCacheVolumesOnSuccessAndFailur
 	}
 }
 
-func TestCreateNativeCheckpointRequiresRunningCacheBackedLease(t *testing.T) {
-	setCheckpointTestState(t)
-	oldOS := hypervHostOS
-	hypervHostOS = "windows"
-	t.Cleanup(func() { hypervHostOS = oldOS })
-	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
-	b := testBackend(runner)
-	b.cacheRoot = t.TempDir()
-	persistCheckpointSource(t, b)
-	cacheVolume := core.CacheVolumeConfig{
-		Key:      "paused-checkpoint-cache",
-		Path:     `D:\crabbox-cache\nuget`,
-		Required: true,
-	}
-	if err := core.UpdateLeaseClaimCacheVolumes(testCheckpointLeaseID, core.CacheVolumeStickyDiskSpecs([]core.CacheVolumeConfig{cacheVolume})); err != nil {
-		t.Fatal(err)
-	}
-	runner.respond = func(req core.LocalCommandRequest) (core.LocalCommandResult, error, bool) {
-		if strings.Contains(commandScript(req), "Select-Object Name,@{Name='ID'") {
-			return jsonResult(t, checkpointVM{Name: testCheckpointVMName, ID: testCheckpointVMID, State: 6}), nil, true
+func TestCreateNativeCheckpointPreservesPausedCacheBackedLease(t *testing.T) {
+	for _, state := range []struct {
+		name          string
+		value         int
+		resumeCommand string
+		pauseCommand  string
+	}{
+		{name: "saved", value: hypervStateSaved, resumeCommand: "Start-VM", pauseCommand: "Save-VM"},
+		{name: "paused", value: hypervStatePaused, resumeCommand: "Resume-VM", pauseCommand: "Suspend-VM"},
+	} {
+		for _, failExport := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/export-failure=%t", state.name, failExport), func(t *testing.T) {
+				setCheckpointTestState(t)
+				oldOS := hypervHostOS
+				hypervHostOS = "windows"
+				t.Cleanup(func() { hypervHostOS = oldOS })
+				artifactDir := t.TempDir()
+				runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+				var cacheVHDPath string
+				runner.respond = func(req core.LocalCommandRequest) (core.LocalCommandResult, error, bool) {
+					script := commandScript(req)
+					switch {
+					case strings.Contains(script, "Select-Object Name,@{Name='ID'"):
+						return jsonResult(t, checkpointVM{Name: testCheckpointVMName, ID: testCheckpointVMID, State: state.value}), nil, true
+					case strings.Contains(script, "Export-VMSnapshot"):
+						if failExport {
+							return core.LocalCommandResult{Stderr: "export failed"}, errors.New("export failed"), true
+						}
+						configPath := filepath.Join(artifactDir, "hyperv", "exported", "Virtual Machines", "checkpoint.vmcx")
+						if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+							t.Fatal(err)
+						}
+						if err := os.WriteFile(configPath, []byte("vmcx"), 0o600); err != nil {
+							t.Fatal(err)
+						}
+						return jsonResult(t, checkpointCreateOutput{
+							SourceVMID:     testCheckpointVMID,
+							SnapshotID:     testCheckpointSnapshot,
+							SnapshotName:   checkpointNameFromScript(script),
+							ExportedConfig: configPath,
+						}), nil, true
+					case strings.Contains(script, "ConvertTo-Json -InputObject $items"):
+						return core.LocalCommandResult{Stdout: "[]"}, nil, true
+					case strings.Contains(script, "Add-VMHardDiskDrive") && strings.Contains(script, cacheVHDPath):
+						return jsonResult(t, hypervCacheAttachOutput{ControllerLocation: 1}), nil, true
+					case strings.Contains(script, "Invoke-Command"):
+						return core.LocalCommandResult{}, nil, true
+					default:
+						return core.LocalCommandResult{}, nil, false
+					}
+				}
+				b := testBackend(runner)
+				b.cacheRoot = t.TempDir()
+				persistCheckpointSource(t, b)
+				cacheVolume := core.CacheVolumeConfig{
+					Key:      "paused-checkpoint-cache",
+					Path:     `D:\crabbox-cache\nuget`,
+					Required: true,
+				}
+				writeTestHyperVCacheVolume(t, b, cacheVolume, hypervCacheMetadata{
+					Version:    hypervCacheMetadataVersion,
+					Key:        cacheVolume.Key,
+					Target:     "windows/normal",
+					Filesystem: "ntfs",
+					DiskID:     "11111111-2222-3333-4444-555555555555",
+					SizeGB:     80,
+				})
+				cacheVHDPath = b.cacheVolumePaths(cacheVolume.Key).vhd
+				if err := core.UpdateLeaseClaimCacheVolumes(testCheckpointLeaseID, core.CacheVolumeStickyDiskSpecs([]core.CacheVolumeConfig{cacheVolume})); err != nil {
+					t.Fatal(err)
+				}
+
+				_, err := b.createNativeCheckpoint(context.Background(), core.NativeCheckpointCreateRequest{
+					Config:      b.cfg,
+					Runtime:     b.rt,
+					Server:      checkpointSourceServer(b),
+					Target:      core.SSHTarget{TargetOS: core.TargetWindows, WindowsMode: core.WindowsModeNormal},
+					LeaseID:     testCheckpointLeaseID,
+					Name:        "paused-cache",
+					ArtifactDir: artifactDir,
+				})
+				if failExport && err == nil {
+					t.Fatal("checkpoint unexpectedly succeeded")
+				}
+				if !failExport && err != nil {
+					t.Fatal(err)
+				}
+				resumeIndex := findCallIndex(runner.calls, state.resumeCommand)
+				unmountIndex := findCallIndex(runner.calls, "Remove-PartitionAccessPath")
+				detachIndex := findCallIndex(runner.calls, "Remove-VMHardDiskDrive -ErrorAction Stop")
+				checkpointIndex := findCallIndex(runner.calls, "Checkpoint-VM")
+				reattachIndex := findCallIndexAll(runner.calls, "Add-VMHardDiskDrive", cacheVHDPath)
+				pauseIndex := findCallIndex(runner.calls, state.pauseCommand)
+				if !(resumeIndex >= 0 &&
+					resumeIndex < unmountIndex &&
+					unmountIndex < detachIndex &&
+					detachIndex < checkpointIndex &&
+					checkpointIndex < reattachIndex &&
+					reattachIndex < pauseIndex) {
+					t.Fatalf(
+						"paused cache checkpoint order resume=%d unmount=%d detach=%d checkpoint=%d reattach=%d pause=%d",
+						resumeIndex,
+						unmountIndex,
+						detachIndex,
+						checkpointIndex,
+						reattachIndex,
+						pauseIndex,
+					)
+				}
+			})
 		}
-		return core.LocalCommandResult{}, nil, false
-	}
-	_, err := b.createNativeCheckpoint(context.Background(), core.NativeCheckpointCreateRequest{
-		Config:      b.cfg,
-		Runtime:     b.rt,
-		Server:      checkpointSourceServer(b),
-		Target:      core.SSHTarget{TargetOS: core.TargetWindows, WindowsMode: core.WindowsModeNormal},
-		LeaseID:     testCheckpointLeaseID,
-		Name:        "paused-cache",
-		ArtifactDir: t.TempDir(),
-	})
-	if err == nil || !strings.Contains(err.Error(), "resume the lease") {
-		t.Fatalf("err=%v", err)
-	}
-	if findCallIndex(runner.calls, "Invoke-Command") >= 0 || findCallIndex(runner.calls, "Checkpoint-VM") >= 0 {
-		t.Fatal("checkpoint mutated a non-running cache-backed lease")
 	}
 }
 
@@ -292,6 +368,21 @@ func TestCreateNativeCheckpointLinuxVerifiesProductionSupport(t *testing.T) {
 	setCheckpointTestState(t)
 	artifactDir := t.TempDir()
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	var events []string
+	var cacheVHDPath string
+	runner.onRun = func(req core.LocalCommandRequest) {
+		script := commandScript(req)
+		switch {
+		case strings.Contains(script, "Get-VMIntegrationService"):
+			events = append(events, "support")
+		case strings.Contains(script, "Remove-VMHardDiskDrive -ErrorAction Stop"):
+			events = append(events, "detach")
+		case strings.Contains(script, "Export-VMSnapshot"):
+			events = append(events, "export")
+		case cacheVHDPath != "" && strings.Contains(script, "Add-VMHardDiskDrive") && strings.Contains(script, cacheVHDPath):
+			events = append(events, "reattach")
+		}
+	}
 	runner.respond = func(req core.LocalCommandRequest) (core.LocalCommandResult, error, bool) {
 		script := commandScript(req)
 		switch {
@@ -322,22 +413,57 @@ func TestCreateNativeCheckpointLinuxVerifiesProductionSupport(t *testing.T) {
 				SnapshotName:   checkpointNameFromScript(script),
 				ExportedConfig: configPath,
 			}), nil, true
+		case strings.Contains(script, "ConvertTo-Json -InputObject $items"):
+			return core.LocalCommandResult{Stdout: "[]"}, nil, true
+		case cacheVHDPath != "" && strings.Contains(script, "Add-VMHardDiskDrive") && strings.Contains(script, cacheVHDPath):
+			return jsonResult(t, hypervCacheAttachOutput{ControllerLocation: 1}), nil, true
 		default:
 			return core.LocalCommandResult{}, nil, false
 		}
 	}
 	b := testBackend(runner)
 	configureLinuxCheckpointBackend(b)
+	b.cacheRoot = t.TempDir()
+	b.runSSHOutput = func(_ context.Context, _ core.SSHTarget, command string) (string, error) {
+		switch {
+		case strings.Contains(command, "sudo umount"):
+			events = append(events, "unmount")
+			return "", nil
+		case strings.Contains(command, "/etc/fstab"):
+			events = append(events, "remount")
+			return "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", nil
+		default:
+			return "", nil
+		}
+	}
 	persistCheckpointSource(t, b)
+	cacheVolume := core.CacheVolumeConfig{
+		Key:      "linux-checkpoint-cache",
+		Path:     "/var/cache/crabbox/go-build",
+		Required: true,
+	}
+	writeTestHyperVCacheVolume(t, b, cacheVolume, hypervCacheMetadata{
+		Version:      hypervCacheMetadataVersion,
+		Key:          cacheVolume.Key,
+		Target:       targetLinux,
+		Filesystem:   "ext4",
+		DiskID:       "11111111-2222-3333-4444-555555555555",
+		FilesystemID: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+		SizeGB:       80,
+	})
+	cacheVHDPath = b.cacheVolumePaths(cacheVolume.Key).vhd
+	if err := core.UpdateLeaseClaimCacheVolumes(testCheckpointLeaseID, core.CacheVolumeStickyDiskSpecs([]core.CacheVolumeConfig{cacheVolume})); err != nil {
+		t.Fatal(err)
+	}
 	oldOS := hypervHostOS
 	hypervHostOS = "windows"
 	t.Cleanup(func() { hypervHostOS = oldOS })
 
-	result, err := (Provider{}).CreateNativeCheckpoint(context.Background(), core.NativeCheckpointCreateRequest{
+	result, err := b.createNativeCheckpoint(context.Background(), core.NativeCheckpointCreateRequest{
 		Config:      b.cfg,
 		Runtime:     core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner},
 		Server:      checkpointSourceServer(b),
-		Target:      core.SSHTarget{TargetOS: core.TargetLinux},
+		Target:      core.SSHTarget{Host: "192.0.2.44", TargetOS: core.TargetLinux},
 		LeaseID:     testCheckpointLeaseID,
 		Name:        "linux-ready",
 		RepoName:    "my-app",
@@ -363,6 +489,10 @@ func TestCreateNativeCheckpointLinuxVerifiesProductionSupport(t *testing.T) {
 		if !strings.Contains(supportScript, expected) {
 			t.Fatalf("support script missing %q: %s", expected, supportScript)
 		}
+	}
+	wantEvents := []string{"support", "unmount", "detach", "export", "reattach", "remount"}
+	if !reflect.DeepEqual(events, wantEvents) {
+		t.Fatalf("Linux checkpoint cache events=%v want %v", events, wantEvents)
 	}
 }
 
@@ -639,6 +769,125 @@ func TestRestoreNativeCheckpointLinuxPreservesIdentityAndRefreshesEndpoint(t *te
 	}
 }
 
+func TestRestoreNativeCheckpointLinuxPreservesSavedCacheLease(t *testing.T) {
+	setCheckpointTestState(t)
+	paths, metadata := createCheckpointArtifact(t)
+	configureLinuxCheckpointMetadata(metadata)
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	var events []string
+	var cacheVHDPath string
+	ipQueries := 0
+	runner.onRun = func(req core.LocalCommandRequest) {
+		script := commandScript(req)
+		switch {
+		case strings.Contains(script, "Start-VM -Name"):
+			events = append(events, "resume")
+		case strings.Contains(script, "Remove-VMHardDiskDrive -ErrorAction Stop"):
+			events = append(events, "detach")
+		case strings.Contains(script, "Restore-VMSnapshot"):
+			events = append(events, "restore")
+		case strings.Contains(script, "Start-VM -VM $vm"):
+			events = append(events, "start-restored")
+		case cacheVHDPath != "" && strings.Contains(script, "Add-VMHardDiskDrive") && strings.Contains(script, cacheVHDPath):
+			events = append(events, "reattach")
+		case strings.Contains(script, "Save-VM"):
+			events = append(events, "pause")
+		}
+	}
+	runner.respond = func(req core.LocalCommandRequest) (core.LocalCommandResult, error, bool) {
+		script := commandScript(req)
+		switch {
+		case strings.Contains(script, "Select-Object Name,@{Name='ID'"):
+			return jsonResult(t, checkpointVM{Name: testCheckpointVMName, ID: testCheckpointVMID, State: hypervStateSaved}), nil, true
+		case strings.Contains(script, "Restore-VMSnapshot"):
+			return core.LocalCommandResult{}, nil, true
+		case strings.Contains(script, "Select-Object -ExpandProperty IPAddresses"):
+			ipQueries++
+			if ipQueries == 1 {
+				return core.LocalCommandResult{Stdout: `["192.0.2.46"]`}, nil, true
+			}
+			return core.LocalCommandResult{Stdout: `["192.0.2.47"]`}, nil, true
+		case strings.Contains(script, "ConvertTo-Json -InputObject $items"):
+			return core.LocalCommandResult{Stdout: "[]"}, nil, true
+		case cacheVHDPath != "" && strings.Contains(script, "Add-VMHardDiskDrive") && strings.Contains(script, cacheVHDPath):
+			return jsonResult(t, hypervCacheAttachOutput{ControllerLocation: 1}), nil, true
+		default:
+			return core.LocalCommandResult{}, nil, false
+		}
+	}
+	b := testBackend(runner)
+	configureLinuxCheckpointBackend(b)
+	b.cacheRoot = t.TempDir()
+	b.sshReady = func(_ context.Context, target *SSHTarget, _ io.Writer, _ string, _ time.Duration) error {
+		if target.TargetOS != core.TargetLinux {
+			t.Fatalf("restored target OS=%q", target.TargetOS)
+		}
+		return nil
+	}
+	b.runSSHOutput = func(_ context.Context, _ core.SSHTarget, command string) (string, error) {
+		switch {
+		case strings.Contains(command, "sudo umount"):
+			events = append(events, "unmount")
+			return "", nil
+		case strings.Contains(command, "/etc/fstab"):
+			events = append(events, "remount")
+			return "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", nil
+		default:
+			return "", nil
+		}
+	}
+	persistCheckpointSource(t, b)
+	cacheVolume := core.CacheVolumeConfig{
+		Key:      "linux-restore-cache",
+		Path:     "/var/cache/crabbox/go-build",
+		Required: true,
+	}
+	writeTestHyperVCacheVolume(t, b, cacheVolume, hypervCacheMetadata{
+		Version:      hypervCacheMetadataVersion,
+		Key:          cacheVolume.Key,
+		Target:       targetLinux,
+		Filesystem:   "ext4",
+		DiskID:       "11111111-2222-3333-4444-555555555555",
+		FilesystemID: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+		SizeGB:       80,
+	})
+	cacheVHDPath = b.cacheVolumePaths(cacheVolume.Key).vhd
+	if err := core.UpdateLeaseClaimCacheVolumes(testCheckpointLeaseID, core.CacheVolumeStickyDiskSpecs([]core.CacheVolumeConfig{cacheVolume})); err != nil {
+		t.Fatal(err)
+	}
+
+	lease, err := b.restoreNativeCheckpoint(context.Background(), core.NativeCheckpointRestoreRequest{
+		Config:  b.cfg,
+		Record:  checkpointForkRecord(paths, metadata),
+		LeaseID: testCheckpointLeaseID,
+		Repo:    core.Repo{Root: t.TempDir()},
+		Reclaim: true,
+	})
+	if err != nil {
+		t.Fatalf("restoreNativeCheckpoint Linux saved cache: %v", err)
+	}
+	if lease.SSH.Host != "192.0.2.47" ||
+		lease.Server.Status != "paused" ||
+		lease.Server.Labels["state"] != "paused" ||
+		lease.Server.Labels["hyperv_state"] != "saved" {
+		t.Fatalf("restored saved Linux lease=%#v", lease)
+	}
+	wantEvents := []string{"resume", "unmount", "detach", "restore", "start-restored", "reattach", "remount", "pause"}
+	if !reflect.DeepEqual(events, wantEvents) {
+		t.Fatalf("Linux saved restore cache events=%v want %v", events, wantEvents)
+	}
+	claim, ok, err := core.ResolveLeaseClaimForProvider(testCheckpointLeaseID, providerName)
+	if err != nil || !ok {
+		t.Fatalf("resolve restored saved Linux claim: ok=%v err=%v", ok, err)
+	}
+	if claim.SSHHost != "192.0.2.47" ||
+		claim.Labels["state"] != "paused" ||
+		len(claim.CacheVolumes) != 1 ||
+		claim.CacheVolumes[0] != cacheVolume.Key+":"+cacheVolume.Path {
+		t.Fatalf("restored saved Linux claim=%#v", claim)
+	}
+}
+
 func TestRestoreNativeCheckpointRejectsRepoConflictBeforeMutation(t *testing.T) {
 	setCheckpointTestState(t)
 	paths, metadata := createCheckpointArtifact(t)
@@ -892,11 +1141,15 @@ func TestForkNativeCheckpointCreatesFreshIdentityAndConnectsNetworkLast(t *testi
 	}
 }
 
-func TestForkNativeCheckpointLinuxSpecializesDisconnectedBeforeNetwork(t *testing.T) {
+func TestForkNativeCheckpointLinuxSpecializesTailscaleAndCachesAfterNetwork(t *testing.T) {
 	setCheckpointTestState(t)
 	paths, metadata := createCheckpointArtifact(t)
 	configureLinuxCheckpointMetadata(metadata)
 	var capturedUserData, capturedMetaData, seedPath string
+	var cacheVHDPath, optionalCacheVHDPath string
+	tailscaleOrder := -1
+	var tailscaleConfig Config
+	var tailscaleTarget SSHTarget
 	runner := &recordingRunner{
 		responses: map[string]core.LocalCommandResult{},
 		onRun: func(req core.LocalCommandRequest) {
@@ -924,12 +1177,65 @@ func TestForkNativeCheckpointLinuxSpecializesDisconnectedBeforeNetwork(t *testin
 			return jsonResult(t, checkpointVM{Name: "fork", ID: "99999999-8888-7777-6666-555555555555", State: 3}), nil, true
 		case strings.Contains(script, "Select-Object -ExpandProperty IPAddresses"):
 			return core.LocalCommandResult{Stdout: `["192.0.2.56"]`}, nil, true
+		case optionalCacheVHDPath != "" &&
+			strings.Contains(script, "ConvertTo-Json -InputObject $items") &&
+			strings.Contains(script, optionalCacheVHDPath):
+			return jsonResult(t, []hypervCacheAttachment{{
+				VMName: "crabbox-other",
+				Path:   optionalCacheVHDPath,
+			}}), nil, true
+		case cacheVHDPath != "" &&
+			strings.Contains(script, "ConvertTo-Json -InputObject $items") &&
+			strings.Contains(script, cacheVHDPath):
+			return core.LocalCommandResult{Stdout: "[]"}, nil, true
+		case cacheVHDPath != "" && strings.Contains(script, "Add-VMHardDiskDrive") && strings.Contains(script, cacheVHDPath):
+			return jsonResult(t, hypervCacheAttachOutput{ControllerLocation: 2}), nil, true
 		default:
 			return core.LocalCommandResult{}, nil, false
 		}
 	}
 	b := testBackend(runner)
 	configureLinuxCheckpointBackend(b)
+	b.cacheRoot = t.TempDir()
+	b.cfg.Tailscale.Enabled = true
+	b.cfg.Tailscale.AuthKey = "invalid-tailscale-fork-fixture"
+	b.cfg.Tailscale.Hostname = "crabbox-linux-fork"
+	b.cfg.Tailscale.Tags = []string{"tag:crabbox"}
+	cacheVolume := core.CacheVolumeConfig{
+		Key:      "linux-fork-go-build",
+		Path:     "/var/cache/crabbox/go-build",
+		Required: true,
+	}
+	optionalCacheVolume := core.CacheVolumeConfig{
+		Key:  "linux-fork-optional",
+		Path: "/var/cache/crabbox/optional",
+	}
+	b.cfg.Cache.Volumes = []core.CacheVolumeConfig{cacheVolume, optionalCacheVolume}
+	for _, volume := range b.cfg.Cache.Volumes {
+		writeTestHyperVCacheVolume(t, b, volume, hypervCacheMetadata{
+			Version:      hypervCacheMetadataVersion,
+			Key:          volume.Key,
+			Target:       targetLinux,
+			Filesystem:   "ext4",
+			DiskID:       "11111111-2222-3333-4444-555555555555",
+			FilesystemID: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+			SizeGB:       80,
+		})
+	}
+	cacheVHDPath = b.cacheVolumePaths(cacheVolume.Key).vhd
+	optionalCacheVHDPath = b.cacheVolumePaths(optionalCacheVolume.Key).vhd
+	b.runSSHOutput = func(_ context.Context, _ core.SSHTarget, command string) (string, error) {
+		if strings.Contains(command, "/etc/fstab") {
+			return "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", nil
+		}
+		return "", nil
+	}
+	b.bootstrapTailscale = func(_ context.Context, cfg Config, target core.SSHTarget) (string, error) {
+		tailscaleOrder = len(runner.calls)
+		tailscaleConfig = cfg
+		tailscaleTarget = target
+		return "", nil
+	}
 	b.ensureLeaseKey = func(Config, string) (string, string, error) {
 		keyPath := filepath.Join(t.TempDir(), "id_ed25519")
 		if err := os.WriteFile(keyPath, []byte("private"), 0o600); err != nil {
@@ -962,31 +1268,34 @@ func TestForkNativeCheckpointLinuxSpecializesDisconnectedBeforeNetwork(t *testin
 	importIndex := findCallIndex(runner.calls, "Import-VM")
 	inheritedDetachIndex := findCallIndex(runner.calls, "GetFileName($_.Path)")
 	seedCreateIndex := findCallIndex(runner.calls, "NewFileSystemLabel 'cidata'")
-	attachIndex := findCallIndex(runner.calls, "Add-VMHardDiskDrive")
+	seedAttachIndex := findCallIndexAll(runner.calls, "Add-VMHardDiskDrive", seedPath)
 	firmwareIndex := findCallIndex(runner.calls, "Set-VMFirmware")
 	offIndex := findCallIndex(runner.calls, "Select-Object Name,@{Name='ID'")
 	detachIndex := findCallIndexAll(runner.calls, "Remove-VMHardDiskDrive", seedPath)
 	verifyIndex := findCallIndex(runner.calls, "offline specialization completion marker")
 	connectIndex := findCallIndex(runner.calls, "Connect-VMNetworkAdapter")
 	ipIndex := findCallIndex(runner.calls, "Select-Object -ExpandProperty IPAddresses")
+	cacheAttachIndex := findCallIndexAll(runner.calls, "Add-VMHardDiskDrive", cacheVHDPath)
 	if len(startIndices) != 2 ||
 		!(importIndex < inheritedDetachIndex &&
 			inheritedDetachIndex < seedCreateIndex &&
-			seedCreateIndex < attachIndex &&
-			attachIndex < firmwareIndex &&
+			seedCreateIndex < seedAttachIndex &&
+			seedAttachIndex < firmwareIndex &&
 			firmwareIndex < startIndices[0] &&
 			startIndices[0] < offIndex &&
 			offIndex < detachIndex &&
 			detachIndex < verifyIndex &&
 			verifyIndex < connectIndex &&
 			connectIndex < startIndices[1] &&
-			startIndices[1] < ipIndex) {
+			startIndices[1] < ipIndex &&
+			ipIndex < tailscaleOrder &&
+			tailscaleOrder < cacheAttachIndex) {
 		t.Fatalf(
-			"Linux specialization order import=%d inherited-detach=%d seed=%d attach=%d firmware=%d starts=%v off=%d detach=%d verify=%d connect=%d ip=%d",
+			"Linux specialization order import=%d inherited-detach=%d seed=%d seed-attach=%d firmware=%d starts=%v off=%d detach=%d verify=%d connect=%d ip=%d tailscale=%d cache-attach=%d",
 			importIndex,
 			inheritedDetachIndex,
 			seedCreateIndex,
-			attachIndex,
+			seedAttachIndex,
 			firmwareIndex,
 			startIndices,
 			offIndex,
@@ -994,6 +1303,8 @@ func TestForkNativeCheckpointLinuxSpecializesDisconnectedBeforeNetwork(t *testin
 			verifyIndex,
 			connectIndex,
 			ipIndex,
+			tailscaleOrder,
+			cacheAttachIndex,
 		)
 	}
 	if firmwareScript := commandScript(runner.calls[firmwareIndex]); !strings.Contains(firmwareScript, secureBootTemplateLinux) {
@@ -1012,8 +1323,9 @@ func TestForkNativeCheckpointLinuxSpecializesDisconnectedBeforeNetwork(t *testin
 		"rm -f /etc/ssh/ssh_host_*",
 		"ssh-keygen -A",
 		"hostnamectl set-hostname " + hostname,
-		"systemctl stop tailscaled.service",
-		"rm -rf /var/lib/tailscale",
+		"systemctl cat tailscaled.service",
+		"rm -f /var/lib/tailscale/tailscaled.state",
+		"rm -f '/var/lib/crabbox'/tailscale-*",
 		"current_instance_dir=\"/var/lib/cloud/instances/" + instanceID + "\"",
 		"! -path \"$current_instance_dir\"",
 		linuxForkSpecializationMarker,
@@ -1024,6 +1336,19 @@ func TestForkNativeCheckpointLinuxSpecializesDisconnectedBeforeNetwork(t *testin
 		if !strings.Contains(capturedUserData, expected) {
 			t.Fatalf("specialization user-data missing %q: %s", expected, capturedUserData)
 		}
+	}
+	if strings.Contains(capturedUserData, b.cfg.Tailscale.AuthKey) ||
+		strings.Contains(capturedMetaData, b.cfg.Tailscale.AuthKey) ||
+		strings.Contains(capturedUserData, "tailscale up") {
+		t.Fatal("Linux fork specialization artifact contains Tailscale join material")
+	}
+	if tailscaleOrder < 0 ||
+		tailscaleTarget.Host != "192.0.2.56" ||
+		tailscaleTarget.TargetOS != core.TargetLinux ||
+		tailscaleConfig.Tailscale.AuthKey != b.cfg.Tailscale.AuthKey ||
+		tailscaleConfig.Tailscale.ResetIdentityBeforeUp ||
+		tailscaleConfig.Tailscale.ScrubCloudInitSecrets {
+		t.Fatalf("Linux fork Tailscale rejoin cfg=%#v target=%#v order=%d", tailscaleConfig.Tailscale, tailscaleTarget, tailscaleOrder)
 	}
 	if seedPath == "" {
 		t.Fatal("specialization seed path was not captured")
@@ -1037,6 +1362,10 @@ func TestForkNativeCheckpointLinuxSpecializesDisconnectedBeforeNetwork(t *testin
 	}
 	if claim.SSHHost != "192.0.2.56" || claim.ProviderScope != instanceScope(lease.Server.CloudID) {
 		t.Fatalf("forked Linux claim=%#v", claim)
+	}
+	wantCache := cacheVolume.Key + ":" + cacheVolume.Path
+	if len(claim.CacheVolumes) != 1 || claim.CacheVolumes[0] != wantCache {
+		t.Fatalf("forked Linux claim cache volumes=%#v want %q", claim.CacheVolumes, wantCache)
 	}
 	if findCallIndex(runner.calls, "Invoke-Command -VMName") >= 0 {
 		t.Fatal("Linux checkpoint fork used PowerShell Direct")

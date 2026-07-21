@@ -184,6 +184,12 @@ per-lease disk after first-boot provisioning so later reboots do not need the
 removed NoCloud datasource. Metadata remains under
 `/var/lib/crabbox/tailscale-*`.
 
+Linux checkpoint forks never place the current auth key in the specialization
+seed or checkpoint metadata. Offline specialization clears copied Tailscale
+identity with the shared target-aware reset contract. After the network is
+connected and SSH is ready, Crabbox sends the fresh key over SSH stdin, rejoins
+the fork, and only then attaches the new lease's requested cache volumes.
+
 Windows installs the pinned official Tailscale MSI only when `tailscale.exe` is
 absent and verifies its SHA-256 before invoking `msiexec`. The auth key is passed
 from the host process environment into a PowerShell Direct remoting argument,
@@ -382,24 +388,27 @@ possibly Tailscale identity:
    matches the new NoCloud instance ID. Guest network signals are not trusted
    for this phase.
 5. Delete the verified specialization seed, connect the configured switch,
-   start the VM, wait for DHCP and SSH/`crabbox-ready`, and persist the new
-   exact claim and endpoint.
+   start the VM, and wait for DHCP and SSH/`crabbox-ready`.
+6. Rejoin Tailscale with the fresh current auth key over SSH stdin, attach only
+   the new lease's successfully mounted cache volumes, and persist the new exact
+   claim and endpoint.
 
 The checkpoint metadata key `linux_fork_specialization` versions this offline
-contract. B10 cache/Tailscale integration should extend the provider-local
-`linuxForkExternalStateResetCommands` hook and bump that version when reset
-semantics change. Cache-volume work should also add its attachment metadata at
-this boundary so imported cache disks can be detached or rekeyed before the
-network is connected; it should not add a second fork implementation.
+contract. `nocloud-v2` denotes the target-aware Tailscale reset plus post-network
+rejoin and new-lease-only cache attachment sequence.
 
-Before Windows checkpoint create/export, Hyper-V unmounts and detaches recorded
-cache disks while holding their short host locks, then reattaches them on both
-success and failure. Cache disks are excluded from exported state. Fork import
-also removes legacy inherited non-OS disks before attaching only the new lease's
-requested caches. The shared detach/reattach helpers are target-aware so future
-Linux checkpoint support can reuse the same host lifecycle and add Linux guest
-unmount behavior. A paused or saved cache-backed Windows lease must be resumed
-before checkpoint creation so the guest mount points can be removed safely.
+Before checkpoint create/export or restore, Hyper-V unmounts and detaches every
+recorded cache disk while holding its short host lock, then reattaches and
+remounts it on both success and failure. Windows uses PowerShell Direct for the
+guest mount transition; Linux uses SSH and verifies the recorded filesystem
+UUID. Cache disks are excluded from exported workspace state.
+
+Fork import removes inherited provider cache disks before offline
+specialization, then attaches only the new lease's requested caches after
+network readiness. Only successful attachments are recorded in the new claim.
+If a cache-backed source lease began in Hyper-V saved or paused state, Crabbox
+temporarily resumes it for safe guest unmounts and restores the exact original
+state after checkpoint create or restore completes, including failure cleanup.
 
 ## Pause and resume
 
