@@ -1149,9 +1149,11 @@ func TestForkNativeCheckpointCreatesFreshIdentityAndConnectsNetworkLast(t *testi
 		}
 	}
 	rotationIndex := findCallIndex(runner.calls, "Rename-Computer")
+	restartIndex := findCallIndex(runner.calls, "Restart-VM")
+	postRestartKeyIndex := findLastCallIndex(runner.calls, "ssh-keygen.exe")
 	connectIndex := findCallIndex(runner.calls, "Connect-VMNetworkAdapter")
-	if rotationIndex < 0 || connectIndex <= rotationIndex {
-		t.Fatalf("network was not connected after identity rotation: rotation=%d connect=%d", rotationIndex, connectIndex)
+	if rotationIndex < 0 || restartIndex <= rotationIndex || postRestartKeyIndex <= restartIndex || connectIndex <= postRestartKeyIndex {
+		t.Fatalf("network was not connected after post-reboot SSH identity rotation: rotation=%d restart=%d key=%d connect=%d", rotationIndex, restartIndex, postRestartKeyIndex, connectIndex)
 	}
 	importIndex := findCallIndex(runner.calls, "Import-VM")
 	excludeIndex := findCallIndex(runner.calls, "GetFileName($_.Path)")
@@ -1159,12 +1161,13 @@ func TestForkNativeCheckpointCreatesFreshIdentityAndConnectsNetworkLast(t *testi
 	if excludeIndex <= importIndex || cacheAttachIndex <= excludeIndex {
 		t.Fatalf("fork cache order import=%d exclude=%d attach=%d", importIndex, excludeIndex, cacheAttachIndex)
 	}
+
 	excludeScript := commandScript(runner.calls[excludeIndex])
 	if strings.Contains(excludeScript, "ControllerLocation") || !strings.Contains(excludeScript, `^cache-[0-9a-fA-F]{32}`) {
 		t.Fatalf("fork exclusion was not limited to provider cache disk names: %s", excludeScript)
 	}
 	rotationScript := commandScript(runner.calls[rotationIndex])
-	for _, expected := range []string{"ssh-ed25519 AAAATEST", "ssh_host_*", "Tailscale", "vnc.password"} {
+	for _, expected := range []string{"ssh-ed25519 AAAATEST", "ssh_host_*", "Tailscale", "vnc.password", "MachineGuid", "[guid]::NewGuid()"} {
 		if !strings.Contains(rotationScript, expected) {
 			t.Fatalf("identity rotation missing %s: %s", expected, rotationScript)
 		}
@@ -1669,6 +1672,15 @@ func findScript(calls []core.LocalCommandRequest, needle string) string {
 func findCallIndex(calls []core.LocalCommandRequest, needle string) int {
 	for i, call := range calls {
 		if strings.Contains(commandScript(call), needle) {
+			return i
+		}
+	}
+	return -1
+}
+
+func findLastCallIndex(calls []core.LocalCommandRequest, needle string) int {
+	for i := len(calls) - 1; i >= 0; i-- {
+		if strings.Contains(commandScript(calls[i]), needle) {
 			return i
 		}
 	}

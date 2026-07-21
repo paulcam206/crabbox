@@ -260,3 +260,14 @@ func TestValidateNetworkConfigRejectsStaticProvisioning(t *testing.T) {
 		t.Fatal("expected --tailscale static provider validation failure")
 	}
 }
+
+func TestValidateNetworkConfigAllowsHyperVWindowsTailscale(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "hyperv"
+	cfg.TargetOS = targetWindows
+	cfg.WindowsMode = WindowsModeNormal
+	cfg.Tailscale.Enabled = true
+	if err := validateNetworkConfig(cfg); err != nil {
+		t.Fatalf("validate Hyper-V Windows Tailscale: %v", err)
+	}
+}

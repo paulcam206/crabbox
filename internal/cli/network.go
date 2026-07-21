@@ -203,7 +203,8 @@ func validateNetworkConfig(cfg Config) error {
 		if cfg.Tailscale.ExitNodeAllowLANAccess && strings.TrimSpace(cfg.Tailscale.ExitNode) == "" {
 			return exit(2, "tailscale.exitNodeAllowLanAccess requires tailscale.exitNode")
 		}
-		if cfg.TargetOS != targetLinux {
+		hyperVWindows := cfg.Provider == "hyperv" && cfg.TargetOS == targetWindows
+		if cfg.TargetOS != targetLinux && !hyperVWindows {
 			return exit(2, "--tailscale managed provisioning currently supports target=linux only")
 		}
 		if isBlacksmithProvider(cfg.Provider) {
