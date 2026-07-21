@@ -151,6 +151,24 @@ tasks:
 }
 
 func windowsBootstrapHeaderPowerShell(cfg Config, publicKey, workRoot string) string {
+	return windowsBootstrapUtilitiesPowerShell() + `
+$user = ` + psQuote(cfg.SSHUser) + `
+$publicKey = ` + psQuote(publicKey) + `
+$workRoot = ` + psQuote(workRoot) + `
+$sshPorts = ` + windowsSSHPortsPowerShell(cfg) + `
+$base = "C:\ProgramData\crabbox"
+$setupCompletePath = Join-Path $base "setup-complete"
+$openSSHZip = "$env:TEMP\OpenSSH-Win64.zip"
+$openSSHInstallRoot = "C:\Program Files\OpenSSH"
+$openSSHSystemRoot = Join-Path $env:WINDIR "System32\OpenSSH"
+$gitInstaller = "$env:TEMP\Git-2.52.0-64-bit.exe"
+New-Item -ItemType Directory -Force -Path $base, $workRoot | Out-Null
+New-Item -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Network\NewNetworkWindowOff" -Force | Out-Null
+Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\ServerManager" -Name DoNotOpenServerManagerAtLogon -Type DWord -Value 1 -ErrorAction SilentlyContinue
+`
+}
+
+func windowsBootstrapUtilitiesPowerShell() string {
 	return `
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
@@ -187,20 +205,35 @@ function Resolve-CrabboxOpenSSHCommand([string]$Name) {
   if ($command -and $command.Source) { return $command.Source }
   throw "OpenSSH command $Name was not found"
 }
-$user = ` + psQuote(cfg.SSHUser) + `
-$publicKey = ` + psQuote(publicKey) + `
-$workRoot = ` + psQuote(workRoot) + `
-$sshPorts = ` + windowsSSHPortsPowerShell(cfg) + `
-$base = "C:\ProgramData\crabbox"
-$setupCompletePath = Join-Path $base "setup-complete"
-$openSSHZip = "$env:TEMP\OpenSSH-Win64.zip"
-$openSSHInstallRoot = "C:\Program Files\OpenSSH"
-$openSSHSystemRoot = Join-Path $env:WINDIR "System32\OpenSSH"
-$gitInstaller = "$env:TEMP\Git-2.52.0-64-bit.exe"
-New-Item -ItemType Directory -Force -Path $base, $workRoot | Out-Null
-New-Item -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Network\NewNetworkWindowOff" -Force | Out-Null
-Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\ServerManager" -Name DoNotOpenServerManagerAtLogon -Type DWord -Value 1 -ErrorAction SilentlyContinue
 `
+}
+
+func managedWindowsDesktopBootstrapPowerShell(user string) string {
+	return `param([string]$userPassword)
+` + windowsBootstrapUtilitiesPowerShell() + `
+$user = ` + psQuote(user) + `
+$base = "C:\ProgramData\crabbox"
+$setupCompletePath = Join-Path $base "desktop-setup-complete"
+$vncPasswordPath = "C:\ProgramData\crabbox\vnc.password"
+$tightVNCInstaller = "$env:TEMP\tightvnc-2.8.85-gpl-setup-64bit.msi"
+New-Item -ItemType Directory -Force -Path $base | Out-Null
+if ([string]::IsNullOrWhiteSpace($userPassword)) {
+  throw "managed Windows desktop bootstrap requires the guest password"
+}
+if (-not (Get-LocalUser -Name $user -ErrorAction SilentlyContinue)) {
+  throw "managed Windows desktop user was not found: $user"
+}
+if (-not (Test-Path -LiteralPath $vncPasswordPath)) {
+  New-CrabboxPassword | Set-Content -NoNewline -Encoding ASCII -Path $vncPasswordPath
+}
+$vncPassword = (Get-Content -Raw -Path $vncPasswordPath).Trim()
+if ($vncPassword.Length -lt 12 -or $vncPassword -notmatch '[A-Z]' -or $vncPassword -notmatch '[a-z]' -or $vncPassword -notmatch '[0-9]' -or $vncPassword -notmatch '[^A-Za-z0-9]') {
+  $vncPassword = New-CrabboxPassword
+  Set-Content -NoNewline -Encoding ASCII -Path $vncPasswordPath -Value $vncPassword
+}
+$userSID = (Get-LocalUser -Name $user).SID.Value
+icacls.exe $vncPasswordPath /inheritance:r /grant "*${userSID}:F" /grant "*S-1-5-32-544:F" /grant "*S-1-5-18:F" | Out-Null
+` + windowsDesktopBootstrapPowerShell()
 }
 
 func windowsBootstrapCorePowerShell() string {
@@ -520,6 +553,10 @@ func windowsDesktopBootstrapPowerShell() string {
     "SET_ACCEPTHTTPCONNECTIONS=1", "VALUE_OF_ACCEPTHTTPCONNECTIONS=0"
   ) -Wait
 }
+$vncPolicyPath = "HKLM:\SOFTWARE\TightVNC\Server"
+New-Item -Path $vncPolicyPath -Force | Out-Null
+New-ItemProperty -Path $vncPolicyPath -Name AllowLoopback -PropertyType DWord -Value 1 -Force | Out-Null
+New-ItemProperty -Path $vncPolicyPath -Name LoopbackOnly -PropertyType DWord -Value 1 -Force | Out-Null
 $startupTask = "CrabboxUserVNC"
 cmd.exe /c "schtasks.exe /Delete /TN $startupTask /F 2>NUL" | Out-Null
 Remove-Item -Force -LiteralPath "C:\ProgramData\crabbox\start-user-vnc.ps1" -ErrorAction SilentlyContinue
