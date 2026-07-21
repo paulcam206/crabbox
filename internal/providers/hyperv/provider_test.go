@@ -96,6 +96,10 @@ func TestProviderSpecAndAliases(t *testing.T) {
 			core.FeatureBrowser,
 			core.FeatureCleanup,
 			core.FeaturePauseResume,
+			core.FeatureCheckpoint,
+			core.FeatureFork,
+			core.FeatureRestore,
+			core.FeatureSnapshot,
 		},
 		Coordinator: core.CoordinatorNever,
 	}
@@ -1611,6 +1615,7 @@ func TestEnsureOpenSSHPasswordNotInArgs(t *testing.T) {
 }
 
 func TestResolveInstancePropagatesQueryError(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	runner := &recordingRunner{
 		responses: map[string]core.LocalCommandResult{},
 		errors:    map[string]error{},
