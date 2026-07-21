@@ -12,13 +12,15 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
+const linuxImageRequirements = "a generalized Debian or Ubuntu cloud VHDX with cloud-init, DHCP, and current Hyper-V integration services (including hv_kvp_daemon)"
+
 func (b *backend) acquireLinux(ctx context.Context, req AcquireRequest) (LeaseTarget, error) {
 	if hypervHostOS != "windows" {
 		return LeaseTarget{}, exit(2, "provider=%s requires a Windows host with Hyper-V enabled", providerName)
 	}
 	cfg := b.configForRun()
 	if cfg.HyperV.Image == "" {
-		return LeaseTarget{}, exit(2, "provider=%s requires --hyperv-image (path to a generalized Debian or Ubuntu cloud VHDX with cloud-init)", providerName)
+		return LeaseTarget{}, exit(2, "provider=%s requires --hyperv-image (path to %s)", providerName, linuxImageRequirements)
 	}
 	if !strings.HasSuffix(strings.ToLower(cfg.HyperV.Image), ".vhdx") {
 		return LeaseTarget{}, exit(2, "provider=%s target=linux requires a generalized cloud VHDX; QCOW2, RAW, ISO, and other image formats are not supported", providerName)
@@ -102,7 +104,8 @@ func (b *backend) acquireLinux(ctx context.Context, req AcquireRequest) (LeaseTa
 	}
 	ip, err := b.waitForIP(ctx, name, 5*time.Minute)
 	if err != nil {
-		return LeaseTarget{}, errors.Join(err, cleanupFailedLease())
+		contractErr := fmt.Errorf("Linux IP discovery requires %s so Get-VMNetworkAdapter can report the DHCP address: %w", linuxImageRequirements, err)
+		return LeaseTarget{}, errors.Join(contractErr, cleanupFailedLease())
 	}
 	lease, err := b.prepareLease(ctx, cfg, hypervVM{Name: name, State: 2}, ip, claim, true)
 	if err != nil {
