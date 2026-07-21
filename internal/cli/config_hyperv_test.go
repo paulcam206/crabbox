@@ -189,3 +189,24 @@ func TestLoadConfigPreservesExplicitHyperVLinuxWorkRoot(t *testing.T) {
 		t.Fatalf("workRoot=%q hyperv.workRoot=%q", cfg.WorkRoot, cfg.HyperV.WorkRoot)
 	}
 }
+
+func TestLoadConfigPreservesExplicitHyperVLinuxDefaultWorkRoot(t *testing.T) {
+	clearConfigEnv(t)
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	data := "provider: hyperv\ntarget: linux\nworkRoot: /srv/global\nhyperv:\n  workRoot: /work/crabbox\n"
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CRABBOX_CONFIG", path)
+	t.Setenv("CRABBOX_PROVIDER", "")
+	t.Setenv("CRABBOX_TARGET", "")
+	t.Setenv("CRABBOX_TARGET_OS", "")
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.WorkRoot != defaultPOSIXWorkRoot || cfg.HyperV.WorkRoot != defaultPOSIXWorkRoot {
+		t.Fatalf("workRoot=%q hyperv.workRoot=%q", cfg.WorkRoot, cfg.HyperV.WorkRoot)
+	}
+}
