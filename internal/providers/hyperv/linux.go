@@ -206,13 +206,8 @@ func (b *backend) createLinuxVM(ctx context.Context, cfg Config, name, seedPath 
 		return err
 	}
 
-	seedScript := fmt.Sprintf(
-		`Add-VMHardDiskDrive -VMName '%s' -ControllerType SCSI -ControllerNumber 0 -ControllerLocation 1 -Path '%s'`,
-		escapePSString(name), escapePSString(seedPath),
-	)
-	result, err = b.powershell(ctx, seedScript)
-	if err != nil {
-		return commandError("attach NoCloud seed disk", result, err)
+	if err := b.attachNoCloudSeed(ctx, name, seedPath); err != nil {
+		return err
 	}
 	if err := b.connectVMNetwork(ctx, name, cfg.HyperV.Switch); err != nil {
 		return err
