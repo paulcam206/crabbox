@@ -30,6 +30,20 @@ func TestSelectCodeConnectionMode(t *testing.T) {
 	if got, err := selectCodeConnectionMode(directSpec, targetLinux, "", false, false); err != nil || got != codeConnectionDirect {
 		t.Fatalf("direct mode=%v err=%v", got, err)
 	}
+	targetAwareSpec := directSpec
+	targetAwareSpec.Name = "target-aware-managed"
+	targetAwareSpec.Features = FeatureSet{FeatureSSH, FeatureCleanup, FeatureCheckpoint, FeatureCacheVolume, FeatureTailscale}
+	linuxFeatures := append(FeatureSet(nil), targetAwareSpec.Features...)
+	linuxFeatures = append(linuxFeatures, FeatureCode)
+	targetAwareSpec.TargetFeatures = map[string]FeatureSet{
+		targetLinux: linuxFeatures,
+	}
+	if got, err := selectCodeConnectionMode(targetAwareSpec, targetLinux, "", false, false); err != nil || got != codeConnectionDirect {
+		t.Fatalf("target-aware Linux mode=%v err=%v", got, err)
+	}
+	if _, err := selectCodeConnectionMode(targetAwareSpec, targetWindows, WindowsModeNormal, false, false); err == nil || !strings.Contains(err.Error(), "Linux") {
+		t.Fatalf("target-aware Windows rejection error=%v", err)
+	}
 
 	coordinatorSpec := directSpec
 	coordinatorSpec.Name = "coordinator-managed"
