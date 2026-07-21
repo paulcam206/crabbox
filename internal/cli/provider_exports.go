@@ -465,6 +465,14 @@ func SetTencentCloudTypeExplicit(cfg *Config) {
 	cfg.tencentCloudTypeExplicit = true
 }
 
+func HyperVWorkRootWasExplicit(cfg Config) bool {
+	return cfg.hyperVWorkRootExplicit
+}
+
+func SetHyperVWorkRootExplicit(cfg *Config) {
+	cfg.hyperVWorkRootExplicit = true
+}
+
 func CrabboxStateDir() (string, error) {
 	return crabboxStateDir()
 }
