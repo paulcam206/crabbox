@@ -43,6 +43,22 @@ func TestPauseSavedGuestIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestPausePreservesTailscaleIdentity(t *testing.T) {
+	b, runner, leaseID, _ := pauseTestLease(t, hypervStateRunning, "192.0.2.10")
+
+	if err := b.Pause(context.Background(), PauseRequest{ID: leaseID}); err != nil {
+		t.Fatal(err)
+	}
+	for _, call := range runner.calls {
+		script := commandScript(call)
+		for _, forbidden := range []string{"tailscale logout", "tailscaled.state", "Stop-Service -Name Tailscale"} {
+			if strings.Contains(script, forbidden) {
+				t.Fatalf("pause mutated Tailscale identity through %q", forbidden)
+			}
+		}
+	}
+}
+
 func TestResumeSavedGuestStartsWaitsAndRefreshesChangedIP(t *testing.T) {
 	b, runner, leaseID, name := pauseTestLease(t, hypervStateSaved, "192.0.2.10")
 	runner.respond = hyperVStateIPSequenceResponder(name, hypervStateSaved, []string{

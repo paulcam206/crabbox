@@ -36,6 +36,7 @@ type backend struct {
 	resumePollInterval     time.Duration
 	waitWindowsVNC         func(context.Context, *SSHTarget, io.Writer, time.Duration) error
 	ensureLeaseKey         func(Config, string) (string, string, error)
+	logoutTailscale        func(context.Context, core.SSHTarget) (string, error)
 }
 
 var hypervHostOS = runtime.GOOS
@@ -70,6 +71,7 @@ func newBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
 		sshReady:               waitForSSHReady,
 		ensureLeaseKey:         ensureTestboxKeyForConfig,
 		waitWindowsVNC:         core.WaitForManagedWindowsLoopbackVNC,
+		logoutTailscale:        core.LogoutTailscaleTarget,
 	}
 }
 
@@ -120,6 +122,8 @@ func applyDefaults(cfg *Config) {
 }
 
 func (b *backend) Spec() ProviderSpec { return b.spec }
+
+func (b *backend) ReleaseLeaseConnectionCleanupSafe() bool { return false }
 
 func (b *backend) RebindResolvedLeaseTarget(target *LeaseTarget, leaseID string) error {
 	core.UseStoredTestboxKey(&target.SSH, leaseID)
@@ -207,6 +211,7 @@ func (b *backend) acquireWindows(ctx context.Context, req AcquireRequest) (Lease
 	cfg.SSHKey = keyPath
 	name := leaseProviderName(leaseID, slug)
 	labels := provisionalWindowsCapabilityLabels(cfg, leaseID, slug, req.Keep, time.Now().UTC())
+	markHyperVTailscaleLabels(labels, cfg)
 	labels["instance"] = name
 	labels["image"] = cfg.HyperV.Image
 	labels["ssh_user"] = cfg.HyperV.User
@@ -225,6 +230,7 @@ func (b *backend) acquireWindows(ctx context.Context, req AcquireRequest) (Lease
 		return LeaseTarget{}, fmt.Errorf("persist hyperv lease before bootstrap: %w", err)
 	}
 	cleanupKey = false
+	tailscaleJoined := false
 	if err := b.createVM(ctx, cfg, name); err != nil {
 		cleanupErr := b.removeVM(context.Background(), name)
 		if cleanupErr == nil {
@@ -235,6 +241,9 @@ func (b *backend) acquireWindows(ctx context.Context, req AcquireRequest) (Lease
 	cleanupFailedLease := func() error {
 		if req.Keep {
 			return nil
+		}
+		if tailscaleJoined {
+			b.logoutWindowsTailscaleBestEffort(context.Background(), name, cfg.HyperV.User)
 		}
 		if err := b.removeVM(context.Background(), name); err != nil {
 			return fmt.Errorf("remove failed hyperv lease %s: %w", leaseID, err)
@@ -283,6 +292,10 @@ func (b *backend) acquireWindows(ctx context.Context, req AcquireRequest) (Lease
 	if err := b.finalizeWindowsCapabilities(ctx, cfg, name, &lease); err != nil {
 		return LeaseTarget{}, errors.Join(err, cleanupFailedLease())
 	}
+	if err := b.bootstrapWindowsTailscale(ctx, name, cfg.HyperV.User, cfg); err != nil {
+		return LeaseTarget{}, errors.Join(err, cleanupFailedLease())
+	}
+	tailscaleJoined = cfg.Tailscale.Enabled
 	if err := persistLease(leaseID, slug, name, cfg, req, lease); err != nil {
 		return LeaseTarget{}, errors.Join(err, cleanupFailedLease())
 	}
@@ -404,6 +417,30 @@ func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) err
 	}
 	if err := requireExactHyperVClaim(lease.LeaseID, name); err != nil {
 		return err
+	}
+	if req.GuardedRemoteCleanup != nil {
+		vm, err := b.queryVM(ctx, name)
+		if err != nil {
+			return err
+		}
+		if vm.State == hypervStateRunning {
+			claim, ok, exact, claimErr := core.ResolveLeaseClaimForProviderWithExact(lease.LeaseID, providerName)
+			if claimErr != nil {
+				return claimErr
+			}
+			if !ok || !exact {
+				return exit(4, "hyperv lease %q lost its exact local claim before remote cleanup", lease.LeaseID)
+			}
+			cleanupLease, prepareErr := b.prepareLease(ctx, b.configForRun(), vm, b.getIPFromClaim(claim), claim, false)
+			if prepareErr != nil {
+				fmt.Fprintf(b.rt.Stderr, "warning: skipping guarded remote cleanup for Hyper-V VM %s: %v\n", name, prepareErr)
+			} else {
+				req.GuardedRemoteCleanup(ctx, cleanupLease)
+			}
+			if err := requireExactHyperVClaim(lease.LeaseID, name); err != nil {
+				return err
+			}
+		}
 	}
 	if err := b.removeVM(ctx, name); err != nil {
 		return err

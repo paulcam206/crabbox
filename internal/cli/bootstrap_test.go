@@ -443,6 +443,7 @@ func TestCloudInitTailscaleProfile(t *testing.T) {
 	cfg.SSHUser = "runner"
 	cfg.Tailscale.Enabled = true
 	cfg.Tailscale.AuthKey = "tskey-secret"
+	cfg.Tailscale.ScrubCloudInitSecrets = true
 	cfg.Tailscale.Hostname = "crabbox-blue-lobster"
 	cfg.Tailscale.Tags = []string{"tag:crabbox"}
 	cfg.Tailscale.ExitNode = "mac-studio.tailnet.ts.net"
@@ -462,7 +463,13 @@ func TestCloudInitTailscaleProfile(t *testing.T) {
 		"printf '%s\\n' 'true' > /var/lib/crabbox/tailscale-exit-node-allow-lan-access",
 		"chown 'runner:runner' /var/lib/crabbox/tailscale-* || true",
 		"test -s /var/lib/crabbox/tailscale-ipv4",
-		"grep -Eq '^100\\.' /var/lib/crabbox/tailscale-ipv4",
+		"awk -F. 'NF == 4",
+		"crabbox-cloud-init-secret-cleanup",
+		`"$cloud_instance_dir/scripts/runcmd"`,
+		`"$cloud_instance_dir/cloud-config.txt"`,
+		"/etc/cloud/cloud-init.disabled",
+		"cloud-init status --wait",
+		"test ! -e /usr/local/sbin/crabbox-cloud-init-secret-cleanup",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("cloudInit(tailscale) missing %q", want)
@@ -470,6 +477,11 @@ func TestCloudInitTailscaleProfile(t *testing.T) {
 	}
 	if strings.Contains(got, `--auth-key="$TS_AUTHKEY"`) {
 		t.Fatal("cloudInit(tailscale) must not expose the auth key through process argv")
+	}
+	cleanupIndex := strings.Index(got, "cat >/usr/local/sbin/crabbox-cloud-init-secret-cleanup")
+	installIndex := strings.Index(got, "retry apt-get install -y --no-install-recommends tailscale")
+	if cleanupIndex < 0 || installIndex <= cleanupIndex {
+		t.Fatalf("cloudInit(tailscale) installs secret cleanup too late: cleanup=%d install=%d", cleanupIndex, installIndex)
 	}
 	if !strings.Contains(got, "systemctl disable crabbox-tailscale-logout.service") {
 		t.Fatal("cloudInit(tailscale) must remove the legacy reboot logout unit")

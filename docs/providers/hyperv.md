@@ -19,7 +19,8 @@ is the default target when `--target` is omitted.
 | Pause and resume | Yes | Yes |
 | Desktop and browser | Yes, through cloud-init | Yes, through PowerShell Direct |
 | Workspace checkpoint, fork, restore, provider snapshot | No | Yes |
-| Code, Tailscale, cache volume | No | No |
+| Tailscale | Yes, through cloud-init | Yes, through PowerShell Direct |
+| Code, cache volume | No | No |
 
 Hyper-V must be enabled on the host (`Enable-WindowsOptionalFeature -Online
 -FeatureName Microsoft-Hyper-V-All`). The provider is Windows-only and will
@@ -35,13 +36,14 @@ reject configuration on non-Windows hosts.
   - current Hyper-V integration services, including a running
     `hv_kvp_daemon` KVP service so Hyper-V can report guest IPs
   - DHCP networking
-  - guest internet access for first-boot apt packages
+  - guest internet access for first-boot apt packages and optional Tailscale
+    installation
 - For Windows, a VHDX with:
   - A local administrator account selected with `--hyperv-user`, with its
     password explicitly provided through `CRABBOX_HYPERV_GUEST_PASSWORD`
   - Network configured for DHCP on the Hyper-V virtual switch
   - Guest internet access to GitHub when OpenSSH or git must be installed on
-    first use
+    first use, and to `pkgs.tailscale.com` when Tailscale is requested
 - The Hyper-V and Windows storage PowerShell modules
 
 Linux support is initially limited to apt-based Debian and Ubuntu cloud images.
@@ -133,6 +135,38 @@ disables SSH password authentication.
 The VM starts with networking connected because cloud-init installs required
 apt packages on first boot. The selected virtual switch must therefore provide
 DHCP and internet access until `crabbox-ready` succeeds.
+
+### Tailscale
+
+Both targets support `--tailscale` and the standard hostname, tags, exit-node,
+and LAN-access settings. Crabbox keeps using the DHCP endpoint until guest
+metadata reports `state=ready`; `--network tailscale` never switches to a
+requested-but-not-ready hostname.
+
+When an exit node is requested with LAN access disabled, Hyper-V defers
+activating the exit node until Crabbox has selected the ready tailnet SSH
+endpoint. This preserves DHCP-based first-boot readiness without weakening the
+requested steady-state setting.
+
+Linux reuses the normal cloud-init Tailscale bootstrap. The auth key exists only
+in the temporary NoCloud payload; a post-`cloud-final` cleanup removes cloud-init
+guest caches containing that payload, and the seed is detached and deleted after
+key-only SSH readiness succeeds. The cleanup disables cloud-init on the
+per-lease disk after first-boot provisioning so later reboots do not need the
+removed NoCloud datasource. Metadata remains under
+`/var/lib/crabbox/tailscale-*`.
+
+Windows installs the pinned official Tailscale MSI only when `tailscale.exe` is
+absent and verifies its SHA-256 before invoking `msiexec`. The auth key is passed
+from the host process environment into a PowerShell Direct remoting argument,
+then written to a short-lived guest file for `tailscale up`; it is not placed in
+host argv, lease claims, labels, logs, or checkpoint metadata. Windows metadata
+is stored under `C:\ProgramData\crabbox\tailscale`.
+
+Release attempts `tailscale logout` before deleting a running VM. Pause/resume
+preserves the Tailscale state and node identity. Windows checkpoint forks remove
+the copied Tailscale state and Crabbox metadata before reconnecting the fork;
+Linux checkpoints are not supported.
 
 ## Configuration
 

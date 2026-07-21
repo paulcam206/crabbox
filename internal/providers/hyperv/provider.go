@@ -45,6 +45,7 @@ func providerCommonFeatures() core.FeatureSet {
 		core.FeatureBrowser,
 		core.FeatureCleanup,
 		core.FeaturePauseResume,
+		core.FeatureTailscale,
 	}
 }
 
@@ -81,9 +82,6 @@ func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, err
 	}
 	if _, err := secureBootSettings(targetOS, cfg.HyperV.SecureBoot); err != nil {
 		return nil, err
-	}
-	if cfg.Tailscale.Enabled || string(cfg.Network) == "tailscale" {
-		return nil, core.Exit(2, "--tailscale is not supported for provider=%s; use a remote SSH provider when tailnet reachability is required", providerName)
 	}
 	return newBackend(p.Spec(), cfg, rt), nil
 }
