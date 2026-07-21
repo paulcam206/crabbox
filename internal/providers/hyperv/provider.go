@@ -24,7 +24,7 @@ func (Provider) Spec() core.ProviderSpec {
 		Targets:  providerTargets(),
 		Features: providerFeatures(),
 		TargetFeatures: map[string]core.FeatureSet{
-			core.TargetLinux: providerFeatures(),
+			core.TargetLinux: append(providerFeatures(), core.FeatureCode),
 		},
 		Coordinator: core.CoordinatorNever,
 	}

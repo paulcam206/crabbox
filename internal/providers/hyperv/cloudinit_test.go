@@ -44,6 +44,7 @@ func TestCreateNoCloudSeedUsesCidataAndCoreCloudInit(t *testing.T) {
 	cfg.TargetOS = targetLinux
 	cfg.Desktop = true
 	cfg.Browser = true
+	cfg.Code = true
 	cfg.HyperV.WorkRoot = "/work/crabbox"
 	cfg.WorkRoot = "/work/crabbox"
 	publicKey := "ssh-ed25519 test-public-key"
@@ -63,6 +64,8 @@ func TestCreateNoCloudSeedUsesCidataAndCoreCloudInit(t *testing.T) {
 		"PasswordAuthentication no",
 		"crabbox-desktop.service",
 		"/var/lib/crabbox/browser.env",
+		"/usr/local/bin/code-server",
+		"/usr/local/bin/code-server --version >/dev/null",
 		"crabbox-ready",
 	} {
 		if !strings.Contains(capturedUserData, want) {
