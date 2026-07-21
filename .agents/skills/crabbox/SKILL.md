@@ -193,19 +193,19 @@ Native Windows targets use PowerShell and tar-based manifest sync. Prefer plain
 argv for one executable such as `dotnet test`; use `--shell` for multi-statement
 PowerShell and `--script <file.ps1>` for longer scripts.
 
-### Hyper-V Windows leases
+### Hyper-V leases
 
-`hyperv` is a native-Windows SSH-lease provider. A template needs a Generation 2
-VHDX, DHCP networking, and a known local administrator credential supplied
-through trusted user config or `CRABBOX_HYPERV_GUEST_PASSWORD`.
+`hyperv` is a Windows-hosted SSH-lease provider for Linux and native Windows
+guests. Both targets use Generation 2 VHDX templates and DHCP networking.
 See `docs/providers/hyperv.md` for the complete bootstrap and lifecycle contract.
 
-OpenSSH Server and git do not need to be preinstalled. When absent, the provider
-uses PowerShell Direct to bootstrap a pinned, SHA-256-verified Win32-OpenSSH MSI
-and MinGit inside the guest; templates with existing `sshd` and `git` skip those
-downloads. Guest internet access to GitHub is therefore required only for
-missing bootstrap tools. OpenSSH installation does not depend on Windows Update
-or a Features on Demand source.
+Windows templates need a known local administrator credential supplied through
+trusted user config or `CRABBOX_HYPERV_GUEST_PASSWORD`; the provider uses
+PowerShell Direct to bootstrap OpenSSH and MinGit when absent. Linux templates
+must be generalized Debian or Ubuntu cloud VHDXs with cloud-init and current
+Hyper-V integration services, including the KVP daemon used for guest IP
+discovery. Linux boots from temporary NoCloud seed media, uses key-only SSH,
+and never uses PowerShell Direct for guest commands.
 
 ```powershell
 crabbox run --provider hyperv --target windows `

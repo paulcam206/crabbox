@@ -2,15 +2,15 @@
 
 Provider id: `hyperv`
 Kind: SSH lease
-Targets: Windows (native)
+Targets: Linux, Windows (native)
 Family: `local-vm`
 
 ## Overview
 
-The Hyper-V provider creates and manages Windows virtual machines on a local
-Windows host using Microsoft Hyper-V. VMs are provisioned as Generation 2 VMs
-from a pre-configured VHDX template, connected to a configurable virtual switch
-(default: "Default Switch"), and accessed over SSH via Windows OpenSSH.
+The Hyper-V provider creates and manages Linux or Windows virtual machines on a
+local Windows host using Microsoft Hyper-V. VMs are provisioned as Generation 2
+VMs from a generalized VHDX template, connected to a configurable virtual
+switch (default: "Default Switch"), and accessed over SSH.
 
 Hyper-V must be enabled on the host (`Enable-WindowsOptionalFeature -Online
 -FeatureName Microsoft-Hyper-V-All`). The provider is Windows-only and will
@@ -20,13 +20,24 @@ reject configuration on non-Windows hosts.
 
 - Windows 10 Pro/Enterprise/Education or Windows Server with Hyper-V enabled
 - PowerShell 5.1 or later (ships with Windows)
-- A Windows VHDX template (Generation 2 / UEFI) with:
+- A Generation 2 / UEFI VHDX template for the selected target
+- For Linux, a generalized Debian or Ubuntu cloud VHDX with:
+  - cloud-init NoCloud support
+  - current Hyper-V integration services, including a running
+    `hv_kvp_daemon`/`hyperv-daemons` KVP service so Hyper-V can report guest IPs
+  - DHCP networking
+  - guest internet access for first-boot apt packages
+- For Windows, a VHDX with:
   - A local administrator account selected with `--hyperv-user`, with its
     password explicitly provided through `CRABBOX_HYPERV_GUEST_PASSWORD`
   - Network configured for DHCP on the Hyper-V virtual switch
   - Guest internet access to GitHub when OpenSSH or git must be installed on
     first use
-- The Hyper-V PowerShell module (included with the Hyper-V feature)
+- The Hyper-V and Windows storage PowerShell modules
+
+Linux support is initially limited to apt-based Debian and Ubuntu cloud images.
+Crabbox does not convert QCOW2 or RAW images. The Linux template must already be
+a generalized VHDX.
 
 OpenSSH and git do **not** need to be pre-installed. On first acquire the
 provider installs the pinned, SHA-256-verified Win32-OpenSSH MSI used by the
@@ -58,7 +69,7 @@ existing Microsoft Edge or Google Chrome installation. It does not install a
 browser, and acquisition fails with a capability error when neither browser is
 present. The `browser=true` label is recorded only after the probe succeeds.
 
-### Preparing a template
+### Preparing a Windows template
 
 The only thing a base Windows VHDX needs is a reachable administrator account.
 For example, from an elevated prompt inside the guest before capturing it:
@@ -102,19 +113,36 @@ Notes:
   value, then the `net.exe` command line at first logon). The guest belongs to
   the lease, and the differencing disk holding it is deleted on release.
 
+### Preparing a Linux template
+
+Use a generalized Debian or Ubuntu cloud VHDX that boots as a Generation 2 VM
+with DHCP, cloud-init, and the Hyper-V KVP integration daemon enabled. On
+Debian/Ubuntu this is normally supplied by the `hyperv-daemons` package and
+reported as `hv_kvp_daemon`. Do not bake a Crabbox password into the image. At
+acquire time Crabbox creates the selected `--hyperv-user`, injects a per-lease
+SSH public key through cloud-init, and disables SSH password authentication.
+
+The VM starts with networking connected because cloud-init installs required
+apt packages on first boot. The selected virtual switch must therefore provide
+DHCP and internet access until `crabbox-ready` succeeds.
+
 ## Configuration
 
 ### Flags
 
 | Flag | Default | Description |
 | --- | --- | --- |
-| `--hyperv-image` | (none) | Path to a Windows VHDX template (required) |
-| `--hyperv-user` | `crabbox` | Local guest administrator account for SSH; letters, digits, `.`, `_`, and `-` only (password via `CRABBOX_HYPERV_GUEST_PASSWORD`) |
-| `--hyperv-work-root` | `C:\crabbox` | Crabbox work root inside the guest |
+| `--hyperv-image` | (none) | Path to the generalized guest VHDX template (required) |
+| `--hyperv-user` | `crabbox` | Guest account for SSH; letters, digits, `.`, `_`, and `-` only |
+| `--hyperv-work-root` | target-specific | `C:\crabbox` for Windows or `/work/crabbox` for Linux |
 | `--hyperv-cpu` | `4` | Number of virtual CPUs |
 | `--hyperv-memory` | `8192` | Memory in MB |
 | `--hyperv-switch` | `Default Switch` | Hyper-V virtual switch name |
-| `--hyperv-init-password` | `false` | Set the guest password at first boot via the lease disk (password-less auto-logon templates) |
+| `--hyperv-secure-boot` | `auto` | `auto`, `windows`, `linux`, or `off` |
+| `--hyperv-init-password` | `false` | Windows only: set the guest password at first boot via the lease disk |
+
+`auto` selects the Microsoft Windows secure boot template for Windows targets
+and the Microsoft UEFI Certificate Authority template for Linux targets.
 
 ### Config file
 
@@ -126,11 +154,13 @@ hyperv:
   cpus: 4
   memory: 8192
   switch: Default Switch
+  secureBoot: auto
   initPassword: false
 ```
 
-Keep `CRABBOX_HYPERV_GUEST_PASSWORD` in the environment or trusted user config,
-not repository config. There is no default guest password.
+For Windows, keep `CRABBOX_HYPERV_GUEST_PASSWORD` in the environment or trusted
+user config, not repository config. There is no default guest password. Linux
+does not use this password and rejects `hyperv.initPassword`.
 
 ### Environment variables
 
@@ -142,15 +172,38 @@ not repository config. There is no default guest password.
 | `CRABBOX_HYPERV_CPUS` | CPU count |
 | `CRABBOX_HYPERV_MEMORY` | Memory in MB |
 | `CRABBOX_HYPERV_SWITCH` | Virtual switch name |
-| `CRABBOX_HYPERV_GUEST_PASSWORD` | Guest user password for SSH key injection |
-| `CRABBOX_HYPERV_INIT_PASSWORD` | Set the guest password at first boot (`true`/`false`) |
+| `CRABBOX_HYPERV_SECURE_BOOT` | Secure boot mode: `auto`, `windows`, `linux`, or `off` |
+| `CRABBOX_HYPERV_GUEST_PASSWORD` | Windows guest password for PowerShell Direct bootstrap |
+| `CRABBOX_HYPERV_INIT_PASSWORD` | Windows only: set the guest password at first boot (`true`/`false`) |
 
 ## Bootstrap contract
 
-During `Acquire`, the provider:
+All targets start with a per-lease differencing root VHDX over the configured
+template and a Generation 2 VM.
 
-1. Creates a per-lease **differencing disk** backed by the template (near-instant
-   and space-thin; the template stays read-only and shared — no multi-GB copy)
+### Linux
+
+During Linux `Acquire`, the provider:
+
+1. Generates cloud-init from the shared `CloudInitUserData` implementation,
+   including the per-lease SSH key and requested desktop/browser bootstrap.
+2. Creates a small dynamic VHDX, formats it as FAT with label `cidata`, and
+   writes UTF-8 no-BOM `user-data` and `meta-data`.
+3. Creates the VM, attaches the seed as a secondary SCSI disk, applies the
+   selected secure boot firmware, connects networking, and starts the VM.
+4. Discovers the DHCP address through `Get-VMNetworkAdapter`.
+5. Waits for key-only SSH and `/usr/local/bin/crabbox-ready`.
+6. Detaches and deletes the seed VHDX after readiness.
+
+Linux guest commands are never run through PowerShell Direct.
+Desktop and browser provisioning are currently supported only for Linux
+targets; Windows requests for those features are rejected.
+
+### Windows
+
+During Windows `Acquire`, the provider:
+
+1. Creates the per-lease differencing disk backed by the template.
 2. With `--hyperv-init-password`, mounts the lease disk offline and writes a
    first-boot `RunOnce` that sets the guest password (password-less templates)
 3. Creates and starts the VM with its network adapter disconnected
@@ -202,18 +255,15 @@ installation.
 
 ## Lifecycle
 
-1. **Acquire**: Creates a per-lease differencing disk over the template
-   (`New-VHD -Differencing -ParentPath`), creates a Generation 2 VM (`New-VM`),
-   configures CPU count and disables automatic checkpoints (`Set-VM`), starts
-   the VM disconnected (`Start-VM`), quarantines and replaces SSH credentials
-   through PowerShell Direct, connects the adapter
-   (`Connect-VMNetworkAdapter`), installs OpenSSH if needed, activates the
-   validated key-only configuration, then waits for SSH readiness.
+1. **Acquire**: Creates a per-lease differencing root disk and Generation 2 VM,
+   applies target-aware secure boot, then follows the Linux cloud-init or
+   Windows PowerShell Direct bootstrap described above.
 2. **Resolve**: Finds a running crabbox VM by lease ID, slug, or instance name.
    Queries live VM state and IP from Hyper-V.
 3. **List**: Lists all VMs with the `crabbox-` name prefix.
 4. **Release**: Stops the VM (`Stop-VM -Force`) and removes it
-   (`Remove-VM -Force`), then cleans up the provider-created VHDX file.
+   (`Remove-VM -Force`), then cleans up provider-owned root, checkpoint, and
+   NoCloud seed VHDX files.
 5. **Cleanup**: Scans for stale `crabbox-` prefixed VMs and removes only VMs
    bound to an exact expired local claim.
 
@@ -226,18 +276,29 @@ installation.
   digits, `.`, `_`, or `-`. Domain/UPN names and SSH pattern characters are
   rejected so `AllowUsers` cannot broaden access.
 - VHD files are stored in `%USERPROFILE%\Hyper-V\Virtual Hard Disks\` by
-  default. Only the provider-created boot disk is cleaned up on release; other
-  attached disks are preserved.
-- The SSH ready check uses the shared native-Windows readiness probe, which
-  verifies that `git`, `tar`, and the work root are available in the guest.
+  default. Only deterministically named provider-owned root, checkpoint, and
+  seed disks are cleaned up; unrelated attached disks are preserved.
+- The Windows ready check verifies `git`, `tar`, and the work root. The Linux
+  ready check executes `/usr/local/bin/crabbox-ready`.
 - There is no `tart exec` or `prlctl exec` equivalent for Hyper-V; all guest
   interaction after bootstrap happens over SSH.
 
 ## Examples
 
+```powershell
+crabbox warmup --provider hyperv --target windows `
+  --hyperv-image C:\Images\win-server.vhdx
+crabbox run --provider hyperv --target windows -- powershell -Command "Get-Process"
+```
+
+```powershell
+crabbox warmup --provider hyperv --target linux `
+  --hyperv-image C:\Images\ubuntu-cloud.vhdx `
+  --hyperv-secure-boot auto
+crabbox run --provider hyperv --target linux -- uname -a
+```
+
 ```sh
-crabbox warmup --provider hyperv --hyperv-image C:\Images\win-server.vhdx
-crabbox run --provider hyperv -- powershell -Command "Get-Process"
 crabbox ssh --provider hyperv
 crabbox stop --provider hyperv --id blue-lobster
 crabbox cleanup --provider hyperv

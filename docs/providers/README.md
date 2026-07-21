@@ -38,7 +38,8 @@ Providers also differ by control plane and reachability:
   macOS, `apple-vm` launches a headless Linux VM through Apple's
   `Virtualization.framework`, `multipass` launches local Ubuntu VMs through
   Canonical Multipass, `tart` runs macOS VMs on Apple Silicon via Cirrus Labs
-  tart, and `hyperv` creates local Windows VMs through Microsoft Hyper-V.
+  tart, and `hyperv` creates local Linux or Windows VMs through Microsoft
+  Hyper-V.
 - **Delegated sandbox** — managed sandbox/proof runners that execute remotely
   without an SSH lease (e.g. `blaxel`, `e2b`, `modal`, `islo`, `cloudflare`,
   `cloudflare-sandbox`, `cloud-run-sandbox`, `azure-dynamic-sessions`,
