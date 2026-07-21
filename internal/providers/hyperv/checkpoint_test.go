@@ -1,0 +1,663 @@
+package hyperv
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
+)
+
+const (
+	testCheckpointLeaseID  = "cbx_checkpoint1234"
+	testCheckpointVMName   = "crabbox-checkpoint-1234"
+	testCheckpointVMID     = "11111111-2222-3333-4444-555555555555"
+	testCheckpointSnapshot = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+)
+
+func TestNativeCheckpointCapabilityPrefersProductionCheckpointForAuto(t *testing.T) {
+	capability, ok := (Provider{}).NativeCheckpointCapability(core.NativeCheckpointRequest{
+		Config:   core.Config{Provider: providerName, TargetOS: core.TargetWindows},
+		Target:   core.SSHTarget{TargetOS: core.TargetWindows},
+		Strategy: "auto",
+	})
+	if !ok || capability.Kind != hypervCheckpointKind || !capability.Direct || !capability.PreferredForAuto {
+		t.Fatalf("capability=%#v ok=%v", capability, ok)
+	}
+}
+
+func TestCreateNativeCheckpointExportsProductionMetadata(t *testing.T) {
+	setCheckpointTestState(t)
+	artifactDir := t.TempDir()
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	runner.respond = func(req core.LocalCommandRequest) (core.LocalCommandResult, error, bool) {
+		script := commandScript(req)
+		switch {
+		case strings.Contains(script, "Get-VM checkpoint query"):
+			return core.LocalCommandResult{}, nil, false
+		case strings.Contains(script, "Select-Object Name,@{Name='ID'"):
+			return jsonResult(t, checkpointVM{Name: testCheckpointVMName, ID: testCheckpointVMID, State: 2}), nil, true
+		case strings.Contains(script, "Export-VMSnapshot"):
+			configPath := filepath.Join(artifactDir, "hyperv", "exported", "Virtual Machines", "checkpoint.vmcx")
+			if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(configPath, []byte("vmcx"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return jsonResult(t, checkpointCreateOutput{
+				SourceVMID:     testCheckpointVMID,
+				SnapshotID:     testCheckpointSnapshot,
+				SnapshotName:   checkpointNameFromScript(script),
+				ExportedConfig: configPath,
+			}), nil, true
+		default:
+			return core.LocalCommandResult{}, nil, false
+		}
+	}
+	b := testBackend(runner)
+	persistCheckpointSource(t, b)
+	oldOS := hypervHostOS
+	hypervHostOS = "windows"
+	t.Cleanup(func() { hypervHostOS = oldOS })
+
+	result, err := (Provider{}).CreateNativeCheckpoint(context.Background(), core.NativeCheckpointCreateRequest{
+		Config:      b.cfg,
+		Runtime:     core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner},
+		Server:      checkpointSourceServer(b),
+		Target:      core.SSHTarget{TargetOS: core.TargetWindows, WindowsMode: core.WindowsModeNormal},
+		LeaseID:     testCheckpointLeaseID,
+		Name:        "release-ready",
+		RepoName:    "my-app",
+		ArtifactDir: artifactDir,
+		Strategy:    "disk-snapshot",
+	})
+	if err != nil {
+		t.Fatalf("CreateNativeCheckpoint: %v", err)
+	}
+	if result.Image.Kind != hypervCheckpointKind || result.Image.ID != testCheckpointSnapshot || result.Image.ResourceID == "" {
+		t.Fatalf("image=%#v", result.Image)
+	}
+	if result.Metadata[checkpointMetadataCheckpointType] != "ProductionOnly" ||
+		result.Metadata[checkpointMetadataSourceVMID] != testCheckpointVMID ||
+		result.Metadata[checkpointMetadataArtifactDir] != artifactDir {
+		t.Fatalf("metadata=%#v", result.Metadata)
+	}
+	if _, err := os.Stat(result.Metadata[checkpointMetadataExportConfig]); err != nil {
+		t.Fatalf("exported config: %v", err)
+	}
+	createScript := findScript(runner.calls, "Export-VMSnapshot")
+	if !strings.Contains(createScript, "-CheckpointType ProductionOnly") {
+		t.Fatalf("create script did not configure production-only checkpoints: %s", createScript)
+	}
+}
+
+func TestCreateNativeCheckpointProductionFailureDoesNotFallback(t *testing.T) {
+	setCheckpointTestState(t)
+	artifactDir := t.TempDir()
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	runner.respond = func(req core.LocalCommandRequest) (core.LocalCommandResult, error, bool) {
+		script := commandScript(req)
+		switch {
+		case strings.Contains(script, "Select-Object Name,@{Name='ID'"):
+			return jsonResult(t, checkpointVM{Name: testCheckpointVMName, ID: testCheckpointVMID, State: 2}), nil, true
+		case strings.Contains(script, "Export-VMSnapshot"):
+			return core.LocalCommandResult{Stderr: "production checkpoint failed"}, errors.New("exit 1"), true
+		default:
+			return core.LocalCommandResult{}, nil, false
+		}
+	}
+	b := testBackend(runner)
+	persistCheckpointSource(t, b)
+	oldOS := hypervHostOS
+	hypervHostOS = "windows"
+	t.Cleanup(func() { hypervHostOS = oldOS })
+
+	_, err := (Provider{}).CreateNativeCheckpoint(context.Background(), core.NativeCheckpointCreateRequest{
+		Config:      b.cfg,
+		Runtime:     core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner},
+		Server:      checkpointSourceServer(b),
+		Target:      core.SSHTarget{TargetOS: core.TargetWindows},
+		LeaseID:     testCheckpointLeaseID,
+		ArtifactDir: artifactDir,
+		Strategy:    "disk-snapshot",
+	})
+	if err == nil {
+		t.Fatal("CreateNativeCheckpoint succeeded after production checkpoint failure")
+	}
+	for _, call := range runner.calls {
+		if strings.Contains(commandScript(call), "CheckpointType Standard") {
+			t.Fatalf("production checkpoint failure fell back to a standard checkpoint: %s", commandScript(call))
+		}
+	}
+	if _, statErr := os.Stat(filepath.Join(artifactDir, "hyperv")); !os.IsNotExist(statErr) {
+		t.Fatalf("failed create left export directory behind: %v", statErr)
+	}
+}
+
+func TestCreateNativeCheckpointCanceledRequestStillCleansLiveSnapshot(t *testing.T) {
+	setCheckpointTestState(t)
+	artifactDir := t.TempDir()
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	runner.respond = func(req core.LocalCommandRequest) (core.LocalCommandResult, error, bool) {
+		if strings.Contains(commandScript(req), "Select-Object Name,@{Name='ID'") {
+			return jsonResult(t, checkpointVM{Name: testCheckpointVMName, ID: testCheckpointVMID, State: 2}), nil, true
+		}
+		return core.LocalCommandResult{}, nil, false
+	}
+	runner.blockUntilCtx = func(req core.LocalCommandRequest) bool {
+		return strings.Contains(commandScript(req), "Export-VMSnapshot")
+	}
+	b := testBackend(runner)
+	persistCheckpointSource(t, b)
+	oldOS := hypervHostOS
+	hypervHostOS = "windows"
+	t.Cleanup(func() { hypervHostOS = oldOS })
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := (Provider{}).CreateNativeCheckpoint(ctx, core.NativeCheckpointCreateRequest{
+		Config:      b.cfg,
+		Runtime:     core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner},
+		Server:      checkpointSourceServer(b),
+		Target:      core.SSHTarget{TargetOS: core.TargetWindows},
+		LeaseID:     testCheckpointLeaseID,
+		ArtifactDir: artifactDir,
+		Strategy:    "disk-snapshot",
+	})
+	if err == nil {
+		t.Fatal("CreateNativeCheckpoint succeeded with a canceled request")
+	}
+	if findCallIndex(runner.calls, "Remove-VMSnapshot") < 0 {
+		t.Fatal("canceled create did not attempt live checkpoint cleanup with a fresh context")
+	}
+}
+
+func TestVerifyNativeCheckpointUsesExportAfterSourceRelease(t *testing.T) {
+	paths, metadata := createCheckpointArtifact(t)
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	runner.respond = func(req core.LocalCommandRequest) (core.LocalCommandResult, error, bool) {
+		if strings.Contains(commandScript(req), "source_missing") {
+			return jsonResult(t, checkpointLiveStatus{State: "source_missing"}), nil, true
+		}
+		return core.LocalCommandResult{}, nil, false
+	}
+	result, err := (Provider{}).VerifyNativeCheckpoint(context.Background(), core.NativeCheckpointResourceRequest{
+		Config:      testBackend(runner).cfg,
+		Runtime:     core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner},
+		ArtifactDir: paths.artifactDir,
+		Metadata:    metadata,
+	})
+	if err != nil {
+		t.Fatalf("VerifyNativeCheckpoint: %v", err)
+	}
+	if result.ProviderState != "available_exported" || result.NextAction != "fork_or_delete" {
+		t.Fatalf("verify result=%#v", result)
+	}
+}
+
+func TestRestoreNativeCheckpointRefreshesClaimEndpoint(t *testing.T) {
+	setCheckpointTestState(t)
+	paths, metadata := createCheckpointArtifact(t)
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	runner.respond = func(req core.LocalCommandRequest) (core.LocalCommandResult, error, bool) {
+		script := commandScript(req)
+		switch {
+		case strings.Contains(script, "Select-Object Name,@{Name='ID'"):
+			return jsonResult(t, checkpointVM{Name: testCheckpointVMName, ID: testCheckpointVMID, State: 3}), nil, true
+		case strings.Contains(script, "Restore-VMSnapshot"):
+			return core.LocalCommandResult{}, nil, true
+		case strings.Contains(script, "Select-Object -ExpandProperty IPAddresses"):
+			return core.LocalCommandResult{Stdout: `["192.0.2.45"]`}, nil, true
+		default:
+			return core.LocalCommandResult{}, nil, false
+		}
+	}
+	b := testBackend(runner)
+	b.waitSSHReady = func(context.Context, *SSHTarget, io.Writer, string, time.Duration) error { return nil }
+	persistCheckpointSource(t, b)
+
+	lease, err := b.restoreNativeCheckpoint(context.Background(), core.NativeCheckpointRestoreRequest{
+		Config:  b.cfg,
+		Record:  checkpointForkRecord(paths, metadata),
+		LeaseID: testCheckpointLeaseID,
+		Repo:    core.Repo{Root: t.TempDir()},
+		Reclaim: true,
+	})
+	if err != nil {
+		t.Fatalf("restoreNativeCheckpoint: %v", err)
+	}
+	if lease.SSH.Host != "192.0.2.45" {
+		t.Fatalf("restored SSH host=%q", lease.SSH.Host)
+	}
+	claim, ok, err := core.ResolveLeaseClaimForProvider(testCheckpointLeaseID, providerName)
+	if err != nil || !ok {
+		t.Fatalf("resolve refreshed claim: ok=%v err=%v", ok, err)
+	}
+	if claim.SSHHost != "192.0.2.45" {
+		t.Fatalf("claim SSH host=%q", claim.SSHHost)
+	}
+}
+
+func TestRestoreNativeCheckpointRejectsRepoConflictBeforeMutation(t *testing.T) {
+	setCheckpointTestState(t)
+	paths, metadata := createCheckpointArtifact(t)
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	b := testBackend(runner)
+	persistCheckpointSource(t, b)
+
+	_, err := b.restoreNativeCheckpoint(context.Background(), core.NativeCheckpointRestoreRequest{
+		Config:  b.cfg,
+		Record:  checkpointForkRecord(paths, metadata),
+		LeaseID: testCheckpointLeaseID,
+		Repo:    core.Repo{Root: t.TempDir()},
+	})
+	if err == nil || !strings.Contains(err.Error(), "claimed by repo") {
+		t.Fatalf("restore conflict err=%v", err)
+	}
+	if findCallIndex(runner.calls, "Restore-VMSnapshot") >= 0 {
+		t.Fatal("restore mutated the VM before rejecting the repo ownership conflict")
+	}
+}
+
+func TestRestoreNativeCheckpointRollsBackReclaimedLeaseOnFailure(t *testing.T) {
+	setCheckpointTestState(t)
+	paths, metadata := createCheckpointArtifact(t)
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	runner.respond = func(req core.LocalCommandRequest) (core.LocalCommandResult, error, bool) {
+		if strings.Contains(commandScript(req), "Select-Object Name,@{Name='ID'") {
+			return core.LocalCommandResult{Stderr: "query failed"}, errors.New("exit 1"), true
+		}
+		return core.LocalCommandResult{}, nil, false
+	}
+	b := testBackend(runner)
+	persistCheckpointSource(t, b)
+	original, ok, err := core.ResolveLeaseClaimForProvider(testCheckpointLeaseID, providerName)
+	if err != nil || !ok {
+		t.Fatalf("resolve original claim: ok=%v err=%v", ok, err)
+	}
+
+	_, err = b.restoreNativeCheckpoint(context.Background(), core.NativeCheckpointRestoreRequest{
+		Config:  b.cfg,
+		Record:  checkpointForkRecord(paths, metadata),
+		LeaseID: testCheckpointLeaseID,
+		Repo:    core.Repo{Root: t.TempDir()},
+		Reclaim: true,
+	})
+	if err == nil {
+		t.Fatal("restore succeeded after VM query failure")
+	}
+	restored, ok, resolveErr := core.ResolveLeaseClaimForProvider(testCheckpointLeaseID, providerName)
+	if resolveErr != nil || !ok {
+		t.Fatalf("resolve rolled-back claim: ok=%v err=%v", ok, resolveErr)
+	}
+	if restored.RepoRoot != original.RepoRoot {
+		t.Fatalf("claim repo=%q, want rollback to %q", restored.RepoRoot, original.RepoRoot)
+	}
+}
+
+func TestRestoreNativeCheckpointRollsBackWhenSnapshotRestoreFails(t *testing.T) {
+	setCheckpointTestState(t)
+	paths, metadata := createCheckpointArtifact(t)
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	runner.respond = func(req core.LocalCommandRequest) (core.LocalCommandResult, error, bool) {
+		script := commandScript(req)
+		switch {
+		case strings.Contains(script, "Select-Object Name,@{Name='ID'"):
+			return jsonResult(t, checkpointVM{Name: testCheckpointVMName, ID: testCheckpointVMID, State: 3}), nil, true
+		case strings.Contains(script, "Restore-VMSnapshot"):
+			return core.LocalCommandResult{Stderr: "restore failed"}, errors.New("exit 1"), true
+		default:
+			return core.LocalCommandResult{}, nil, false
+		}
+	}
+	b := testBackend(runner)
+	persistCheckpointSource(t, b)
+	original, ok, err := core.ResolveLeaseClaimForProvider(testCheckpointLeaseID, providerName)
+	if err != nil || !ok {
+		t.Fatalf("resolve original claim: ok=%v err=%v", ok, err)
+	}
+
+	_, err = b.restoreNativeCheckpoint(context.Background(), core.NativeCheckpointRestoreRequest{
+		Config:  b.cfg,
+		Record:  checkpointForkRecord(paths, metadata),
+		LeaseID: testCheckpointLeaseID,
+		Repo:    core.Repo{Root: t.TempDir()},
+		Reclaim: true,
+	})
+	if err == nil {
+		t.Fatal("restore succeeded after Restore-VMSnapshot failed")
+	}
+	restored, ok, resolveErr := core.ResolveLeaseClaimForProvider(testCheckpointLeaseID, providerName)
+	if resolveErr != nil || !ok {
+		t.Fatalf("resolve rolled-back claim: ok=%v err=%v", ok, resolveErr)
+	}
+	if restored.RepoRoot != original.RepoRoot {
+		t.Fatalf("claim repo=%q, want rollback to %q", restored.RepoRoot, original.RepoRoot)
+	}
+}
+
+func TestRestoreNativeCheckpointKeepsReclaimedLeaseAfterVMMutation(t *testing.T) {
+	setCheckpointTestState(t)
+	paths, metadata := createCheckpointArtifact(t)
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	runner.respond = func(req core.LocalCommandRequest) (core.LocalCommandResult, error, bool) {
+		script := commandScript(req)
+		switch {
+		case strings.Contains(script, "Select-Object Name,@{Name='ID'"):
+			return jsonResult(t, checkpointVM{Name: testCheckpointVMName, ID: testCheckpointVMID, State: 3}), nil, true
+		case strings.Contains(script, "Restore-VMSnapshot"):
+			return core.LocalCommandResult{}, nil, true
+		case strings.Contains(script, "Select-Object -ExpandProperty IPAddresses"):
+			return core.LocalCommandResult{Stdout: `["192.0.2.45"]`}, nil, true
+		default:
+			return core.LocalCommandResult{}, nil, false
+		}
+	}
+	b := testBackend(runner)
+	b.waitSSHReady = func(context.Context, *SSHTarget, io.Writer, string, time.Duration) error {
+		return errors.New("ssh unavailable")
+	}
+	persistCheckpointSource(t, b)
+	newRepo := t.TempDir()
+
+	_, err := b.restoreNativeCheckpoint(context.Background(), core.NativeCheckpointRestoreRequest{
+		Config:  b.cfg,
+		Record:  checkpointForkRecord(paths, metadata),
+		LeaseID: testCheckpointLeaseID,
+		Repo:    core.Repo{Root: newRepo},
+		Reclaim: true,
+	})
+	if err == nil {
+		t.Fatal("restore succeeded when SSH readiness failed")
+	}
+	claim, ok, resolveErr := core.ResolveLeaseClaimForProvider(testCheckpointLeaseID, providerName)
+	if resolveErr != nil || !ok {
+		t.Fatalf("resolve retained claim: ok=%v err=%v", ok, resolveErr)
+	}
+	if claim.RepoRoot != newRepo {
+		t.Fatalf("claim repo=%q, want mutated VM retained by %q", claim.RepoRoot, newRepo)
+	}
+}
+
+func TestForkNativeCheckpointCreatesFreshIdentityAndConnectsNetworkLast(t *testing.T) {
+	setCheckpointTestState(t)
+	paths, metadata := createCheckpointArtifact(t)
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	runner.respond = func(req core.LocalCommandRequest) (core.LocalCommandResult, error, bool) {
+		script := commandScript(req)
+		switch {
+		case strings.Contains(script, "Import-VM"):
+			return jsonResult(t, checkpointImportOutput{ID: "99999999-8888-7777-6666-555555555555"}), nil, true
+		case strings.Contains(script, "Select-Object -ExpandProperty IPAddresses"):
+			return core.LocalCommandResult{Stdout: `["192.0.2.55"]`}, nil, true
+		case strings.Contains(script, "Invoke-Command"):
+			return core.LocalCommandResult{}, nil, true
+		default:
+			return core.LocalCommandResult{}, nil, false
+		}
+	}
+	b := testBackend(runner)
+	b.ensureLeaseKey = func(Config, string) (string, string, error) {
+		keyPath := filepath.Join(t.TempDir(), "id_ed25519")
+		if err := os.WriteFile(keyPath, []byte("private"), 0o600); err != nil {
+			return "", "", err
+		}
+		return keyPath, "ssh-ed25519 AAAATEST fork@test", nil
+	}
+	b.waitSSHReady = func(context.Context, *SSHTarget, io.Writer, string, time.Duration) error { return nil }
+	oldOS := hypervHostOS
+	hypervHostOS = "windows"
+	t.Cleanup(func() { hypervHostOS = oldOS })
+
+	lease, err := b.ForkNativeCheckpoint(context.Background(), core.NativeCheckpointForkLifecycleRequest{
+		Record:        checkpointForkRecord(paths, metadata),
+		Repo:          core.Repo{Root: t.TempDir(), Name: "my-app"},
+		Keep:          true,
+		RequestedSlug: "checkpoint-fork",
+	})
+	if err != nil {
+		t.Fatalf("ForkNativeCheckpoint: %v", err)
+	}
+	if lease.LeaseID == "" || lease.LeaseID == testCheckpointLeaseID || lease.SSH.Host != "192.0.2.55" {
+		t.Fatalf("forked lease=%#v", lease)
+	}
+	importScript := findScript(runner.calls, "Import-VM")
+	for _, expected := range []string{"-Copy", "-GenerateNewId", "-DynamicMacAddress", "Disconnect-VMNetworkAdapter", "Remove-VM -VM $vm"} {
+		if !strings.Contains(importScript, expected) {
+			t.Fatalf("import script missing %s: %s", expected, importScript)
+		}
+	}
+	rotationIndex := findCallIndex(runner.calls, "Rename-Computer")
+	connectIndex := findCallIndex(runner.calls, "Connect-VMNetworkAdapter")
+	if rotationIndex < 0 || connectIndex <= rotationIndex {
+		t.Fatalf("network was not connected after identity rotation: rotation=%d connect=%d", rotationIndex, connectIndex)
+	}
+	rotationScript := commandScript(runner.calls[rotationIndex])
+	for _, expected := range []string{"ssh-ed25519 AAAATEST", "ssh_host_*", "Tailscale", "vnc.password"} {
+		if !strings.Contains(rotationScript, expected) {
+			t.Fatalf("identity rotation missing %s: %s", expected, rotationScript)
+		}
+	}
+}
+
+func TestDeleteNativeCheckpointIsIndependentAndIdempotent(t *testing.T) {
+	paths, metadata := createCheckpointArtifact(t)
+	sourceMarker := filepath.Join(t.TempDir(), "source.vm")
+	if err := os.WriteFile(sourceMarker, []byte("source"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	req := core.NativeCheckpointResourceRequest{
+		Config:      testBackend(runner).cfg,
+		Runtime:     core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner},
+		ArtifactDir: paths.artifactDir,
+		Metadata:    metadata,
+	}
+	if err := (Provider{}).DeleteNativeCheckpoint(context.Background(), req); err != nil {
+		t.Fatalf("DeleteNativeCheckpoint: %v", err)
+	}
+	if _, err := os.Stat(paths.exportRoot); !os.IsNotExist(err) {
+		t.Fatalf("export remains after delete: %v", err)
+	}
+	if _, err := os.Stat(sourceMarker); err != nil {
+		t.Fatalf("checkpoint delete removed independent source marker: %v", err)
+	}
+	if err := (Provider{}).DeleteNativeCheckpoint(context.Background(), req); err != nil {
+		t.Fatalf("idempotent DeleteNativeCheckpoint: %v", err)
+	}
+}
+
+func TestDeleteNativeCheckpointRejectsPathTraversal(t *testing.T) {
+	artifactDir := t.TempDir()
+	victim := filepath.Join(filepath.Dir(artifactDir), "victim")
+	if err := os.MkdirAll(victim, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	config := filepath.Join(victim, "victim.vmcx")
+	if err := os.WriteFile(config, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	metadata := checkpointMetadata(artifactDir, filepath.Join(artifactDir, "..", "victim"), config)
+	err := (Provider{}).DeleteNativeCheckpoint(context.Background(), core.NativeCheckpointResourceRequest{
+		Config:      testBackend(runner).cfg,
+		Runtime:     core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner},
+		ArtifactDir: artifactDir,
+		Metadata:    metadata,
+	})
+	if err == nil || !strings.Contains(err.Error(), "unowned") {
+		t.Fatalf("path traversal delete err=%v", err)
+	}
+	if _, err := os.Stat(config); err != nil {
+		t.Fatalf("path traversal validation removed victim: %v", err)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("path traversal reached PowerShell: %#v", runner.calls)
+	}
+}
+
+func TestReleaseStoragePreservesCheckpointExport(t *testing.T) {
+	setCheckpointTestState(t)
+	name := "crabbox-release-1234"
+	vhdDir := hypervVHDDir()
+	if err := os.MkdirAll(vhdDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(vhdDir, name+".vhdx"), []byte("lease"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	paths, _ := createCheckpointArtifact(t)
+	b := testBackend(&recordingRunner{responses: map[string]core.LocalCommandResult{}})
+	if err := b.removeVMStorage(name, nil); err != nil {
+		t.Fatalf("removeVMStorage: %v", err)
+	}
+	if _, err := os.Stat(paths.config); err != nil {
+		t.Fatalf("source release removed checkpoint export: %v", err)
+	}
+}
+
+func TestCleanupSkipsCheckpointRestoreReservation(t *testing.T) {
+	now := time.Now().UTC()
+	server := Server{Status: "stopped", Labels: map[string]string{
+		hypervCheckpointRestoreReservationLabel: core.LeaseLabelTime(now.Add(time.Minute)),
+	}}
+	claim := core.LeaseClaim{LeaseID: testCheckpointLeaseID, Labels: server.Labels}
+	if cleanup, reason := shouldCleanup(server, claim, true, now); cleanup || reason != "checkpoint restore reserved" {
+		t.Fatalf("cleanup=%v reason=%q", cleanup, reason)
+	}
+}
+
+func setCheckpointTestState(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, "state"))
+}
+
+func persistCheckpointSource(t *testing.T, b *backend) {
+	t.Helper()
+	cfg := b.configForRun()
+	server := checkpointSourceServer(b)
+	lease := LeaseTarget{Server: server, LeaseID: testCheckpointLeaseID}
+	req := AcquireRequest{Repo: core.Repo{Root: t.TempDir()}}
+	if err := persistLease(testCheckpointLeaseID, "checkpoint-source", testCheckpointVMName, cfg, req, lease); err != nil {
+		t.Fatalf("persist source lease: %v", err)
+	}
+}
+
+func checkpointSourceServer(b *backend) Server {
+	cfg := b.configForRun()
+	labels := directLeaseLabels(cfg, testCheckpointLeaseID, "checkpoint-source", providerName, "", true, time.Now().UTC())
+	labels["instance"] = testCheckpointVMName
+	labels["ssh_user"] = cfg.HyperV.User
+	labels["work_root"] = cfg.HyperV.WorkRoot
+	claim := core.LeaseClaim{
+		LeaseID:       testCheckpointLeaseID,
+		Slug:          "checkpoint-source",
+		Provider:      providerName,
+		ProviderScope: instanceScope(testCheckpointVMName),
+		Labels:        labels,
+	}
+	return b.serverFromInstance(hypervVM{Name: testCheckpointVMName, State: 2}, claim, cfg)
+}
+
+func createCheckpointArtifact(t *testing.T) (checkpointArtifactPaths, map[string]string) {
+	t.Helper()
+	artifactDir := t.TempDir()
+	exportRoot := filepath.Join(artifactDir, "hyperv")
+	config := filepath.Join(exportRoot, "exported", "Virtual Machines", "checkpoint.vmcx")
+	if err := os.MkdirAll(filepath.Dir(config), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(config, []byte("vmcx"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return checkpointArtifactPaths{artifactDir: artifactDir, exportRoot: exportRoot, config: config}, checkpointMetadata(artifactDir, exportRoot, config)
+}
+
+func checkpointMetadata(artifactDir, exportRoot, config string) map[string]string {
+	return map[string]string{
+		checkpointMetadataArtifactDir:    artifactDir,
+		checkpointMetadataExportRoot:     exportRoot,
+		checkpointMetadataExportConfig:   config,
+		checkpointMetadataSourceLease:    testCheckpointLeaseID,
+		checkpointMetadataSourceVM:       testCheckpointVMName,
+		checkpointMetadataSourceVMID:     testCheckpointVMID,
+		checkpointMetadataSnapshotID:     testCheckpointSnapshot,
+		checkpointMetadataSnapshotName:   "checkpoint",
+		checkpointMetadataCheckpointType: "ProductionOnly",
+		checkpointMetadataTarget:         core.TargetWindows,
+		checkpointMetadataProviderScope:  instanceScope(testCheckpointVMName),
+		checkpointMetadataSSHUser:        "crabbox",
+		checkpointMetadataWorkRoot:       `C:\crabbox`,
+		checkpointMetadataSwitch:         "Default Switch",
+	}
+}
+
+func checkpointForkRecord(paths checkpointArtifactPaths, metadata map[string]string) core.NativeCheckpointForkRecord {
+	return core.NativeCheckpointForkRecord{
+		Kind:        hypervCheckpointKind,
+		ImageID:     testCheckpointSnapshot,
+		Name:        metadata[checkpointMetadataSnapshotName],
+		Resource:    paths.config,
+		ArtifactDir: paths.artifactDir,
+		TargetOS:    core.TargetWindows,
+		WindowsMode: core.WindowsModeNormal,
+		Metadata:    metadata,
+	}
+}
+
+func commandScript(req core.LocalCommandRequest) string {
+	if len(req.Args) == 0 {
+		return ""
+	}
+	return req.Args[len(req.Args)-1]
+}
+
+func findScript(calls []core.LocalCommandRequest, needle string) string {
+	index := findCallIndex(calls, needle)
+	if index < 0 {
+		return ""
+	}
+	return commandScript(calls[index])
+}
+
+func findCallIndex(calls []core.LocalCommandRequest, needle string) int {
+	for i, call := range calls {
+		if strings.Contains(commandScript(call), needle) {
+			return i
+		}
+	}
+	return -1
+}
+
+func jsonResult(t *testing.T, value any) core.LocalCommandResult {
+	t.Helper()
+	data, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return core.LocalCommandResult{Stdout: string(data)}
+}
+
+func checkpointNameFromScript(script string) string {
+	const marker = "-SnapshotName '"
+	start := strings.Index(script, marker)
+	if start < 0 {
+		return ""
+	}
+	start += len(marker)
+	end := strings.Index(script[start:], "'")
+	if end < 0 {
+		return ""
+	}
+	return strings.ReplaceAll(script[start:start+end], "''", "'")
+}
