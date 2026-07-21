@@ -87,6 +87,9 @@ func (b *backend) acquireLinux(ctx context.Context, req AcquireRequest) (LeaseTa
 	var tailscaleCleanupTarget SSHTarget
 	seedPath := cloudInitSeedPath(name)
 	cleanupFailedLease := func() error {
+		if req.Keep && !cfg.Tailscale.Enabled {
+			return nil
+		}
 		if tailscaleCleanupTarget.Host != "" {
 			b.logoutLinuxTailscaleBestEffort(tailscaleCleanupTarget)
 		}
