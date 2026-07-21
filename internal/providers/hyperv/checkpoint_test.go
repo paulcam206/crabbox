@@ -386,12 +386,23 @@ func TestResumeCheckpointCacheSourceUsesResolvedTarget(t *testing.T) {
 		testCheckpointVMName,
 		hypervStateSaved,
 		b.cfg,
-		core.SSHTarget{TargetOS: core.TargetLinux},
+		core.SSHTarget{
+			TargetOS:       core.TargetLinux,
+			Key:            "per-lease-key",
+			KnownHostsFile: "known-hosts",
+			HostKeyAlias:   "checkpoint-source",
+		},
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !transitioned || !sshReady || target.TargetOS != core.TargetLinux || target.Host != "192.0.2.88" {
+	if !transitioned ||
+		!sshReady ||
+		target.TargetOS != core.TargetLinux ||
+		target.Host != "192.0.2.88" ||
+		target.Key != "per-lease-key" ||
+		target.KnownHostsFile != "known-hosts" ||
+		target.HostKeyAlias != "checkpoint-source" {
 		t.Fatalf("target=%#v transitioned=%t sshReady=%t", target, transitioned, sshReady)
 	}
 	if findCallIndex(runner.calls, "Invoke-Command") >= 0 {

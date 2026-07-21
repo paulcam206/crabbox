@@ -653,7 +653,7 @@ func (b *backend) mountLinuxCacheVolume(ctx context.Context, target SSHTarget, u
 		`fi`,
 		`entry="UUID=$uuid $fstab_path ext4 defaults,nofail 0 2"`,
 		`fstab_tmp="$(mktemp)"`,
-		`awk -v mount="$fstab_path" 'NF < 2 || $2 != mount { print }' /etc/fstab >"$fstab_tmp"`,
+		`FSTAB_MOUNT_PATH="$fstab_path" awk 'NF < 2 || $2 != ENVIRON["FSTAB_MOUNT_PATH"] { print }' /etc/fstab >"$fstab_tmp"`,
 		`printf '%s\n' "$entry" >>"$fstab_tmp"`,
 		`sudo install -m 0644 "$fstab_tmp" /etc/fstab`,
 		`rm -f "$fstab_tmp"`,
@@ -694,7 +694,7 @@ func (b *backend) unmountLinuxCacheVolume(ctx context.Context, target SSHTarget,
 		`  sudo umount "$mount_path"`,
 		`fi`,
 		`fstab_tmp="$(mktemp)"`,
-		`awk -v mount="$fstab_path" 'NF < 2 || $2 != mount { print }' /etc/fstab >"$fstab_tmp"`,
+		`FSTAB_MOUNT_PATH="$fstab_path" awk 'NF < 2 || $2 != ENVIRON["FSTAB_MOUNT_PATH"] { print }' /etc/fstab >"$fstab_tmp"`,
 		`sudo install -m 0644 "$fstab_tmp" /etc/fstab`,
 		`rm -f "$fstab_tmp"`,
 		`if [ -f "$mount_path" ]; then`,
@@ -727,16 +727,14 @@ func (b *backend) lockLeaseCacheVolumes(ctx context.Context, leaseID string, cfg
 	if !ok || len(claim.CacheVolumes) == 0 {
 		return nil, target, nil
 	}
+	applyStoredLeaseKey(&cfg, leaseID)
 	if target.Host == "" && claim.SSHHost != "" {
-		if keyPath, keyErr := testboxKeyPath(leaseID); keyErr == nil {
-			if _, statErr := os.Stat(keyPath); statErr == nil {
-				cfg.SSHKey = keyPath
-			}
-		}
 		target = sshTargetFromConfig(cfg, claim.SSHHost)
 		if claim.SSHPort > 0 {
 			target.Port = strconv.Itoa(claim.SSHPort)
 		}
+	} else if target.Key == "" {
+		target.Key = cfg.SSHKey
 	}
 	detached := make([]hypervDetachedCacheVolume, 0, len(claim.CacheVolumes))
 	for _, spec := range claim.CacheVolumes {

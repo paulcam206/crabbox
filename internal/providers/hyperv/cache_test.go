@@ -477,7 +477,7 @@ func TestLinuxCacheMountFormatsExt4AndPersistsUUIDMount(t *testing.T) {
 		`sudo mount -U "$uuid" "$mount_path"`,
 		"/etc/fstab",
 		hypervCacheDetachedGuard,
-		`awk -v mount="$fstab_path"`,
+		`ENVIRON["FSTAB_MOUNT_PATH"]`,
 		`sudo install -m 0644 "$fstab_tmp" /etc/fstab`,
 		"sudo chown 'crabbox:crabbox'",
 	} {
@@ -527,7 +527,7 @@ func TestLinuxCacheUnmountVerifiesFilesystemIdentity(t *testing.T) {
 		"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
 		`sudo umount "$mount_path"`,
 		hypervCacheDetachedGuard,
-		`awk -v mount="$fstab_path"`,
+		`ENVIRON["FSTAB_MOUNT_PATH"]`,
 		`sudo chmod 000 "$mount_path"`,
 	} {
 		if !strings.Contains(remote, want) {
