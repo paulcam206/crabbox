@@ -24,7 +24,7 @@ reject configuration on non-Windows hosts.
 - For Linux, a generalized Debian or Ubuntu cloud VHDX with:
   - cloud-init NoCloud support
   - current Hyper-V integration services, including a running
-    `hv_kvp_daemon`/`hyperv-daemons` KVP service so Hyper-V can report guest IPs
+    `hv_kvp_daemon` KVP service so Hyper-V can report guest IPs
   - DHCP networking
   - guest internet access for first-boot apt packages
 - For Windows, a VHDX with:
@@ -113,10 +113,13 @@ Notes:
 
 Use a generalized Debian or Ubuntu cloud VHDX that boots as a Generation 2 VM
 with DHCP, cloud-init, and the Hyper-V KVP integration daemon enabled. On
-Debian/Ubuntu this is normally supplied by the `hyperv-daemons` package and
-reported as `hv_kvp_daemon`. Do not bake a Crabbox password into the image. At
-acquire time Crabbox creates the selected `--hyperv-user`, injects a per-lease
-SSH public key through cloud-init, and disables SSH password authentication.
+Debian this is commonly supplied by `hyperv-daemons`; Ubuntu cloud images
+commonly use the matching `linux-cloud-tools-virtual` and
+`linux-cloud-tools-common` packages. Package names vary by image and kernel, so
+verify that `hv_kvp_daemon` is running before generalizing the VHDX. Do not bake
+a Crabbox password into the image. At acquire time Crabbox creates the selected
+`--hyperv-user`, injects a per-lease SSH public key through cloud-init, and
+disables SSH password authentication.
 
 The VM starts with networking connected because cloud-init installs required
 apt packages on first boot. The selected virtual switch must therefore provide
