@@ -101,6 +101,10 @@ func TestProviderSpecAndAliases(t *testing.T) {
 			core.FeatureBrowser,
 			core.FeatureCleanup,
 			core.FeaturePauseResume,
+			core.FeatureCheckpoint,
+			core.FeatureFork,
+			core.FeatureRestore,
+			core.FeatureSnapshot,
 		},
 		Coordinator: core.CoordinatorNever,
 	}
