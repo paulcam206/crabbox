@@ -195,31 +195,17 @@ PowerShell and `--script <file.ps1>` for longer scripts.
 
 ### Hyper-V leases
 
-`hyperv` is a Windows-hosted SSH-lease provider for Linux and native Windows
-guests. Both targets use Generation 2 VHDX templates and DHCP networking.
-See `docs/providers/hyperv.md` for the complete bootstrap and lifecycle contract.
+`hyperv` is a direct Windows-hosted `ssh-lease`/`local-vm` provider for Linux and native Windows Generation 2 VHDXs; both targets support SSH/sync, desktop/browser, pause/resume, Tailscale, cache volumes, production checkpoints, fork/restore/snapshot, while `code` is Linux-only and Windows `--browser` only probes a preinstalled Edge/Chrome. See `docs/providers/hyperv.md`.
 
-Windows templates need a known local administrator credential supplied through
-trusted user config or `CRABBOX_HYPERV_GUEST_PASSWORD`; the provider uses
-PowerShell Direct to bootstrap OpenSSH and MinGit when absent. Linux templates
-must be generalized Debian or Ubuntu cloud VHDXs with cloud-init and current
-Hyper-V integration services, including the KVP daemon used for guest IP
-discovery. Linux boots from temporary NoCloud seed media, uses key-only SSH,
-and never uses PowerShell Direct for guest commands.
+Windows needs DHCP plus a known local administrator password from trusted user config or `CRABBOX_HYPERV_GUEST_PASSWORD` (never argv/repo/logs); Windows-only PowerShell Direct bootstraps OpenSSH/MinGit and optional capabilities. Linux needs a generalized Debian/Ubuntu cloud VHDX, NoCloud cloud-init, DHCP/internet, `hv_kvp_daemon` for IP discovery, and `hv_vss_daemon` plus VSS integration for checkpoints; it uses key-only SSH and never PowerShell Direct. `--hyperv-secure-boot auto` chooses the Windows or Microsoft UEFI CA template; override with `windows|linux|off`.
 
-```powershell
-crabbox run --provider hyperv --target windows `
-  --hyperv-image 'C:\Images\windows.vhdx' `
-  --timing-json --no-sync `
-  -- powershell -NoProfile -Command "whoami; hostname"
-```
+Run elevated or with Hyper-V VM/storage permissions, preferably headless/session-0 because failed PowerShell Direct auth can display UI. Doctor is non-mutating inventory/feature proof only: it does not boot the image or validate credentials, KVP/VSS, or browsers.
 
-For provider-development proof on an interactive Windows host, prefer an
-elevated headless/session-0 runner. Windows can display credential UI for failed
-early PowerShell Direct attempts even when the host command is non-interactive.
-Keep the guest password out of command arguments and logs, save the timing/run
-output, and verify that the lease reaches `state=ready`, executes over SSH, and
-releases cleanly.
+Pause uses `Save-VM`; checkpoints are production-only; restore requires the original exact claim. Linux fork performs offline NoCloud identity rotation and Tailscale reset before network rejoin. Cache VHDXs are target-specific, persistent, single-writer, detached around checkpoints, excluded from exports, and preserved by release/cleanup. Tailscale stays on DHCP until ready, logs out on release, and resets on fork. Windows VNC and Linux code-server are loopback-only through SSH tunnels.
+
+Windows proof: `crabbox doctor --provider hyperv --target windows --hyperv-image 'C:\Images\windows-template.vhdx'`, then `crabbox warmup --provider hyperv --target windows --hyperv-image 'C:\Images\windows-template.vhdx' --slug hyperv-win-smoke --timing-json`, `crabbox status --provider hyperv --id hyperv-win-smoke --wait`, a no-sync command, and `crabbox stop --provider hyperv hyperv-win-smoke`.
+Linux proof: `crabbox warmup --provider hyperv --target linux --hyperv-image 'C:\Images\ubuntu-cloud.vhdx' --slug hyperv-linux-smoke --code --cache-volume build-cache:/var/cache/build --timing-json`, then status, no-sync `uname -a`, optional `crabbox code`, and stop.
+Exercise `pause`/`resume`, `checkpoint create --mode native --wait`, `checkpoint fork`, source-only `checkpoint restore`, and `cleanup --dry-run`. Expected blockers: host permissions, wrong image/generation, bad Windows credentials, DHCP/internet, KVP/VSS, missing Windows browser, or a busy cache VHDX. Destructive actions require an exact claim; explicitly `--reclaim` recovered VMs.
 
 ## Secrets And Environment Forwarding
 

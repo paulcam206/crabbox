@@ -53,6 +53,21 @@ Linux support is initially limited to apt-based Debian and Ubuntu cloud images.
 Crabbox does not convert QCOW2 or RAW images. The Linux template must already be
 a generalized VHDX.
 
+### Host permissions and doctor
+
+Run Crabbox on the Hyper-V host from an elevated shell or an account authorized
+to manage Hyper-V VMs, firmware, switches, VHDXs, and storage. For unattended
+provider validation, prefer a headless/session-0 runner: failed early
+PowerShell Direct authentication can display credential UI on an interactive
+desktop even when Crabbox itself is non-interactive.
+
+`crabbox doctor --provider hyperv` is non-mutating. It checks that the host is
+Windows, queries the Hyper-V optional feature, inventories VMs, and reports the
+configured image path. It does not validate that the image exists or boots,
+that Windows credentials work, or that Linux KVP/VSS and optional browser
+requirements are satisfied. `--probe-ssh` reports that a running lease is
+required rather than creating one.
+
 OpenSSH and git do **not** need to be pre-installed. On first acquire the
 provider installs the pinned, SHA-256-verified Win32-OpenSSH MSI used by the
 `Microsoft.OpenSSH.Preview` winget package and, if absent, portable MinGit
@@ -203,8 +218,9 @@ is stored under `C:\ProgramData\crabbox\tailscale`.
 
 Release attempts `tailscale logout` before deleting a running VM. Pause/resume
 preserves the Tailscale state and node identity. Windows checkpoint forks remove
-the copied Tailscale state and Crabbox metadata before reconnecting the fork;
-Linux checkpoints are not supported.
+the copied Tailscale state and Crabbox metadata before reconnecting the fork.
+Linux checkpoint forks clear copied identity during offline specialization and
+rejoin with the current auth key over SSH after network readiness.
 
 ## Configuration
 
@@ -447,14 +463,19 @@ installation.
 1. **Acquire**: Creates a per-lease differencing root disk and Generation 2 VM,
    applies target-aware secure boot, then follows the Linux cloud-init or
    Windows PowerShell Direct bootstrap described above.
-2. **Resolve**: Finds a running crabbox VM by lease ID, slug, or instance name.
-   Queries live VM state and IP from Hyper-V.
-3. **List**: Lists all VMs with the `crabbox-` name prefix.
-4. **Release**: Stops the VM (`Stop-VM -Force`) and removes it
-   (`Remove-VM -Force`), then cleans up provider-owned root, checkpoint, and
-   NoCloud seed VHDX files.
-5. **Cleanup**: Scans for stale `crabbox-` prefixed VMs and removes only VMs
-   bound to an exact expired local claim.
+2. **Resolve**: Finds a VM by lease ID, slug, or instance name and reports live
+   Hyper-V state. Reuse requires a live VM and an exact local claim; a recovered
+   legacy VM must be adopted with explicit `--reclaim`.
+3. **List**: Includes Hyper-V VMs referenced by local provider claims plus
+   unclaimed `crabbox-` prefixed candidates. A name prefix is inventory evidence,
+   not ownership proof.
+4. **Release**: Requires an exact local claim, performs guarded remote cleanup,
+   detaches recorded cache volumes, attempts Tailscale logout, stops/removes the
+   VM, and deletes VM-owned root, internal checkpoint, and NoCloud seed storage.
+   Exported checkpoint artifacts and persistent cache VHDXs survive release.
+5. **Cleanup**: Deletes only exact-claimed VMs whose state or expiry makes them
+   eligible, preserves `keep=true` and restore-reserved VMs, and prunes missing
+   local claims only after the provisioning grace period.
 
 ## Notes
 
