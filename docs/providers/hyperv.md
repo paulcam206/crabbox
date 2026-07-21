@@ -38,6 +38,26 @@ Windows Update, WSUS, or a matching Features on Demand source. This keeps the
 template requirement to a plain Windows VHDX with a known admin password. ISO
 images are not supported — provide a fully installed VHDX.
 
+## Desktop and browser capabilities
+
+`--desktop` installs the pinned, SHA-256-verified TightVNC server after the
+OpenSSH and git bootstrap completes. TightVNC is configured without a firewall
+exception and restricted to loopback; connect through Crabbox's SSH-backed VNC
+or WebVNC commands. The guest account password is passed to PowerShell Direct
+through the host process environment and a remoting argument, never on the
+host command line. TightVNC receives a separate generated password stored at
+`C:\ProgramData\crabbox\vnc.password`.
+
+The desktop setup enables auto-logon and performs one expected Windows reboot.
+Acquisition waits for bounded PowerShell Direct readiness, reruns the marked
+idempotent setup after reboot, then waits for both SSH and loopback VNC
+readiness before recording `desktop=true`.
+
+`--browser` is probe-only. After final SSH readiness, Crabbox accepts an
+existing Microsoft Edge or Google Chrome installation. It does not install a
+browser, and acquisition fails with a capability error when neither browser is
+present. The `browser=true` label is recorded only after the probe succeeds.
+
 ### Preparing a template
 
 The only thing a base Windows VHDX needs is a reachable administrator account.
@@ -145,7 +165,14 @@ During `Acquire`, the provider:
 7. Reapplies the final key-only config, validates `sshd_config`, regenerates
    per-lease SSH host keys, starts sshd, and removes the quarantine rule last
 8. Installs git (MinGit) if absent — required for Crabbox sync
-9. Waits for SSH readiness on the injected key
+9. With `--desktop`, installs/configures loopback-only TightVNC, handles its
+   expected one-time reboot through bounded PowerShell Direct retries, and
+   reruns the marked setup idempotently
+10. Waits for SSH readiness on the injected key and, for `--desktop`, loopback
+    VNC readiness
+11. With `--browser`, probes for Edge or Chrome without installing either
+12. Records successful desktop/browser lease labels only after all requested
+    readiness checks pass
 
 The readiness probe, OpenSSH-install, and key-injection steps authenticate over
 PowerShell Direct using the guest administrator password. The readiness probe
