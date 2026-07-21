@@ -355,6 +355,7 @@ func (b *backend) createNativeCheckpoint(ctx context.Context, req core.NativeChe
 		cfg.HyperV.WorkRoot = workRoot
 		cfg.WorkRoot = workRoot
 	}
+	applyStoredLeaseKey(&cfg, req.LeaseID)
 	cacheTarget := req.Target
 	cacheTarget.TargetOS = target
 	if target == core.TargetWindows {
@@ -530,8 +531,18 @@ func (b *backend) resumeCheckpointCacheSource(ctx context.Context, name string, 
 		if err != nil {
 			return restoreOnError(err)
 		}
-		target = sshTargetFromConfig(resolvedCfg, ip)
-		target.Port = sshPort
+		target.Host = ip
+		target.TargetOS = targetOS
+		target.WindowsMode = resolvedCfg.WindowsMode
+		if target.User == "" {
+			target.User = resolvedCfg.HyperV.User
+		}
+		if target.Key == "" {
+			target.Key = resolvedCfg.SSHKey
+		}
+		if target.Port == "" {
+			target.Port = sshPort
+		}
 		target.FallbackPorts = []string{}
 		if err := b.sshReady(ctx, &target, b.rt.Stderr, "hyperv checkpoint ssh", bootstrapWaitTimeout(resolvedCfg)); err != nil {
 			return restoreOnError(err)
@@ -727,6 +738,7 @@ func (b *backend) restoreNativeCheckpoint(ctx context.Context, req core.NativeCh
 		cfg.HyperV.WorkRoot = value
 		cfg.WorkRoot = value
 	}
+	applyStoredLeaseKey(&cfg, sourceLease)
 	reservationServer := b.serverFromInstance(hypervVM{Name: sourceName, State: 2}, previousClaim, cfg)
 	reservationTarget := sshTargetFromConfig(cfg, previousClaim.SSHHost)
 	if previousClaim.SSHPort > 0 {

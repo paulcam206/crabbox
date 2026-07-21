@@ -1147,14 +1147,7 @@ func (b *backend) prepareLease(ctx context.Context, cfg Config, inst hypervVM, i
 		return LeaseTarget{}, exit(5, "hyperv instance %s has no IPv4 address", inst.Name)
 	}
 	server.PublicNet.IPv4.IP = ip
-	if claim.LeaseID != "" {
-		keyPath, err := testboxKeyPath(claim.LeaseID)
-		if err == nil {
-			if _, statErr := os.Stat(keyPath); statErr == nil {
-				cfg.SSHKey = keyPath
-			}
-		}
-	}
+	applyStoredLeaseKey(&cfg, claim.LeaseID)
 	target := sshTargetFromConfig(cfg, ip)
 	target.Port = sshPort
 	target.FallbackPorts = []string{}
@@ -1169,6 +1162,19 @@ func (b *backend) prepareLease(ctx context.Context, cfg Config, inst hypervVM, i
 		server.Labels["state"] = "ready"
 	}
 	return LeaseTarget{Server: server, SSH: target, LeaseID: claim.LeaseID}, nil
+}
+
+func applyStoredLeaseKey(cfg *Config, leaseID string) {
+	if cfg == nil || strings.TrimSpace(leaseID) == "" {
+		return
+	}
+	keyPath, err := testboxKeyPath(leaseID)
+	if err != nil {
+		return
+	}
+	if _, err := os.Stat(keyPath); err == nil {
+		cfg.SSHKey = keyPath
+	}
 }
 
 func (b *backend) removeVM(ctx context.Context, name string) error {
