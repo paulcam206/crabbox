@@ -447,8 +447,8 @@ func TestControllerWorkspaceLifecycleAndIdempotency(t *testing.T) {
 	if bytes.Contains(stateData, []byte("/desktop")) || bytes.Contains(got.Body.Bytes(), []byte("vncUrl")) {
 		t.Fatal("desktop URL persisted or included in normal workspace response")
 	}
-	if info, err := os.Stat(service.opts.StateFile); err != nil || info.Mode().Perm() != 0o600 {
-		t.Fatalf("state mode info=%v err=%v", info, err)
+	if err := verifySSHTransportPathPrivate(service.opts.StateFile, false); err != nil {
+		t.Fatalf("state file is not private: %v", err)
 	}
 
 	deleted := controllerHTTP(service, http.MethodDelete, "/v1/workspaces/demo-box", "test-token", nil)
@@ -1940,15 +1940,19 @@ func TestControllerRestartResumesProviderStopAfterDurableLocalRevocation(t *test
 	}
 	runner := newFakeControllerWorkspaceRunner()
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	service, err := newControllerService(ctx, controllerServiceOptions{
 		StateFile: path, MaxConcurrent: 1, Profile: request.Profile,
 		CreateTimeout: time.Second, InspectTimeout: time.Second, StopTimeout: time.Second,
 		ConnectionTimeout: time.Second, RetryDelay: 10 * time.Millisecond, ReadyReconcileInterval: time.Hour,
 	}, runner, "token", &bytes.Buffer{})
 	if err != nil {
+		cancel()
 		t.Fatal(err)
 	}
+	defer func() {
+		cancel()
+		service.waitForShutdown()
+	}()
 	service.startReconciliation()
 	waitControllerWorkspaceStatus(t, service, request.ID, "stopped")
 	runner.mu.Lock()
@@ -2055,15 +2059,19 @@ func TestControllerRestartReconcilesProvisioningWorkspace(t *testing.T) {
 	runner := newFakeControllerWorkspaceRunner()
 	runner.ready[request.ID] = fakeControllerStatus("cbx-ctl-restart-box-0000000000000000")
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	service, err := newControllerService(ctx, controllerServiceOptions{
 		StateFile: path, MaxConcurrent: 1, Profile: request.Profile,
 		CreateTimeout: time.Second, InspectTimeout: time.Second, StopTimeout: time.Second,
 		ConnectionTimeout: time.Second,
 	}, runner, "token", &bytes.Buffer{})
 	if err != nil {
+		cancel()
 		t.Fatal(err)
 	}
+	defer func() {
+		cancel()
+		service.waitForShutdown()
+	}()
 	service.startReconciliation()
 	waitControllerWorkspaceStatus(t, service, request.ID, "ready")
 	warmups, _, _ := runner.counts()
@@ -2094,7 +2102,6 @@ func TestControllerRestartDoesNotTreatUnreadyInspectionAsReady(t *testing.T) {
 	unready.Ready = false
 	runner.ready[request.ID] = unready
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	service, err := newControllerService(ctx, controllerServiceOptions{
 		StateFile: path, MaxConcurrent: 1, Profile: request.Profile,
 		// CreateTimeout also bounds provisioning staleness (provisioningExpired);
@@ -2104,8 +2111,13 @@ func TestControllerRestartDoesNotTreatUnreadyInspectionAsReady(t *testing.T) {
 		ConnectionTimeout: time.Second,
 	}, runner, "token", &bytes.Buffer{})
 	if err != nil {
+		cancel()
 		t.Fatal(err)
 	}
+	defer func() {
+		cancel()
+		service.waitForShutdown()
+	}()
 	service.startReconciliation()
 	waitControllerWorkspaceStatusMessage(t, service, request.ID, "provisioning", "workspace provisioning; waiting for provider")
 	warmups, _, _ := runner.counts()
@@ -2916,8 +2928,8 @@ func TestSaveControllerStateCreatesAndReplacesNestedState(t *testing.T) {
 	if got := loaded.Workspaces["durable-box"]; got.Status != "stopped" || got.Message != "second" {
 		t.Fatalf("loaded state=%#v", got)
 	}
-	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o600 {
-		t.Fatalf("state mode info=%v err=%v", info, err)
+	if err := verifySSHTransportPathPrivate(path, false); err != nil {
+		t.Fatalf("state file is not private: %v", err)
 	}
 }
 

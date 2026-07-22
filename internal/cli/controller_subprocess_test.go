@@ -377,7 +377,14 @@ func TestControllerChildCredentialPolicyFailsClosedOnCorruptPersistedRoute(t *te
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "corrupt.json"), []byte("{"), 0o600); err != nil {
+	if err := secureSSHTransportPath(dir, true); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "corrupt.json")
+	if err := os.WriteFile(path, []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := secureSSHTransportPath(path, false); err != nil {
 		t.Fatal(err)
 	}
 	runner := execControllerWorkspaceRunner{opts: execControllerRunnerOptions{Provider: "aws", TargetOS: targetLinux}}

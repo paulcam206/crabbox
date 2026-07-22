@@ -42,6 +42,18 @@ func ExpandUserPath(path string) string {
 	return expandUserPath(path)
 }
 
+func UserHomeDirectory() string {
+	return userHomeDirectory()
+}
+
+func UserConfigDirectory() (string, error) {
+	return userConfigDirectory()
+}
+
+func SecurePrivatePath(path string, directory bool) error {
+	return secureSSHTransportPath(path, directory)
+}
+
 func ApplyLeaseDuration(target *time.Duration, value string) error {
 	if value == "" {
 		return nil

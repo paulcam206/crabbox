@@ -78,7 +78,7 @@ func testboxKeyPath(leaseID string) (string, error) {
 	if leaseID != strings.TrimSpace(leaseID) || !validLeaseClaimID(leaseID) {
 		return "", invalidLeaseClaimIDError{id: leaseID}
 	}
-	dir, err := os.UserConfigDir()
+	dir, err := userConfigDirectory()
 	if err != nil {
 		return "", exit(2, "user config directory is unavailable")
 	}
@@ -90,7 +90,7 @@ func ensureTestboxLeaseDirectory(leaseID string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	configDir, err := os.UserConfigDir()
+	configDir, err := userConfigDirectory()
 	if err != nil {
 		return "", exit(2, "user config directory is unavailable")
 	}
@@ -126,7 +126,7 @@ func inspectTestboxLeaseDirectory(leaseID string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	configDir, err := os.UserConfigDir()
+	configDir, err := userConfigDirectory()
 	if err != nil {
 		return "", exit(2, "user config directory is unavailable")
 	}
@@ -228,6 +228,9 @@ func ensureTestboxKeyWithType(leaseID, keyType string) (string, string, error) {
 		return "", "", err
 	}
 	if _, err := os.Stat(privatePath); err == nil {
+		if err := verifySSHTransportPathPrivate(privatePath, false); err != nil {
+			return "", "", exit(2, "testbox key is not private: %v", err)
+		}
 		publicKey, err := PublicKeyFor(privatePath)
 		return privatePath, publicKey, err
 	}
@@ -241,6 +244,9 @@ func ensureTestboxKeyWithType(leaseID, keyType string) (string, string, error) {
 	cmd := exec.Command("ssh-keygen", args...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return "", "", exit(2, "generate ssh key for %s: %v: %s", leaseID, err, strings.TrimSpace(string(out)))
+	}
+	if err := secureSSHTransportPath(privatePath, false); err != nil {
+		return "", "", exit(2, "secure generated testbox key: %v", err)
 	}
 	publicKey, err := PublicKeyFor(privatePath)
 	return privatePath, publicKey, err

@@ -77,6 +77,9 @@ func stableTopLevelDirectoryBoundary(path string) (string, error) {
 }
 
 func userHomeDirectory() string {
+	if home := os.Getenv("HOME"); home != "" {
+		return home
+	}
 	home, _ := os.UserHomeDir()
 	return home
 }

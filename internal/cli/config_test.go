@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -617,6 +618,17 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_EXTERNAL_IDEMPOTENT_LEASE_ID",
 	} {
 		t.Setenv(key, "")
+	}
+}
+
+func TestBaseConfigUsesHomeForDefaultSSHKey(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	cfg := baseConfig()
+	want := filepath.Join(home, ".ssh", "id_ed25519")
+	if cfg.SSHKey != want {
+		t.Fatalf("SSHKey=%q want %q", cfg.SSHKey, want)
 	}
 }
 
@@ -1539,6 +1551,8 @@ func TestSealosDevboxConfigDefaultsFileAndEnv(t *testing.T) {
 
 func TestAgentSandboxConfigDefaultsFileAndEnv(t *testing.T) {
 	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
 	cfg := baseConfig()
 	if cfg.AgentSandbox.Kubectl != "kubectl" ||
 		cfg.AgentSandbox.Namespace != "default" ||
@@ -1574,7 +1588,7 @@ func TestAgentSandboxConfigDefaultsFileAndEnv(t *testing.T) {
 	}
 	if cfg.Provider != "agent-sandbox" ||
 		cfg.AgentSandbox.Kubectl != "/opt/bin/kubectl" ||
-		!strings.HasSuffix(cfg.AgentSandbox.Kubeconfig, "/.kube/agent-sandbox") ||
+		cfg.AgentSandbox.Kubeconfig != filepath.Join(home, ".kube", "agent-sandbox") ||
 		cfg.AgentSandbox.Context != "agent-context" ||
 		cfg.AgentSandbox.Namespace != "sandboxes" ||
 		cfg.AgentSandbox.WarmPool != "linux-pool" ||
@@ -5007,6 +5021,8 @@ func TestCoderConfigDefaultsSetWorkRoot(t *testing.T) {
 
 func TestIncusConfigDefaultsFileAndEnv(t *testing.T) {
 	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
 	cfg := baseConfig()
 	if cfg.Incus.Remote != "local" || cfg.Incus.Project != "" || cfg.Incus.InstanceType != "container" || cfg.Incus.Image != "images:ubuntu/24.04/cloud" {
 		t.Fatalf("incus defaults not applied: %#v", cfg.Incus)
@@ -5036,13 +5052,13 @@ func TestIncusConfigDefaultsFileAndEnv(t *testing.T) {
 			RemoteImageServer: "https://images.example.test",
 		},
 	})
-	if cfg.Incus.Remote != "lab" || cfg.Incus.Project != "crabbox" || cfg.Incus.Address != "https://incus.example.test:8443" || !strings.HasSuffix(cfg.Incus.Socket, "/incus.sock") {
+	if cfg.Incus.Remote != "lab" || cfg.Incus.Project != "crabbox" || cfg.Incus.Address != "https://incus.example.test:8443" || cfg.Incus.Socket != filepath.Join(home, "incus.sock") {
 		t.Fatalf("file incus config not applied: %#v", cfg.Incus)
 	}
 	if cfg.Incus.InstanceType != "vm" || cfg.Incus.Image != "images:ubuntu/26.04/cloud" || cfg.Incus.Profile != "crabbox" || cfg.Incus.User != "ubuntu" || cfg.Incus.WorkRoot != "/workspace/incus" {
 		t.Fatalf("file incus identity config not applied: %#v", cfg.Incus)
 	}
-	if cfg.Incus.DeleteOnRelease || cfg.Incus.StartTimeout != 12*time.Minute || cfg.Incus.ProxyListenPort != "2201" || cfg.Incus.ProxyDevice != "ssh-proxy" || !strings.HasSuffix(cfg.Incus.TLSServerCert, "/certs/incus.crt") || !cfg.Incus.InsecureTLS || cfg.Incus.RemoteImageServer != "https://images.example.test" {
+	if cfg.Incus.DeleteOnRelease || cfg.Incus.StartTimeout != 12*time.Minute || cfg.Incus.ProxyListenPort != "2201" || cfg.Incus.ProxyDevice != "ssh-proxy" || cfg.Incus.TLSServerCert != filepath.Join(home, "certs", "incus.crt") || !cfg.Incus.InsecureTLS || cfg.Incus.RemoteImageServer != "https://images.example.test" {
 		t.Fatalf("file incus runtime config not applied: %#v", cfg.Incus)
 	}
 
@@ -5067,13 +5083,13 @@ func TestIncusConfigDefaultsFileAndEnv(t *testing.T) {
 	if err := applyEnv(&cfg); err != nil {
 		t.Fatalf("applyEnv err=%v", err)
 	}
-	if cfg.Incus.Remote != "env-remote" || cfg.Incus.Project != "env-project" || cfg.Incus.Address != "https://env-incus.example.test:8443" || !strings.HasSuffix(cfg.Incus.Socket, "/env-incus.sock") {
+	if cfg.Incus.Remote != "env-remote" || cfg.Incus.Project != "env-project" || cfg.Incus.Address != "https://env-incus.example.test:8443" || cfg.Incus.Socket != filepath.Join(home, "env-incus.sock") {
 		t.Fatalf("env incus config not applied: %#v", cfg.Incus)
 	}
 	if cfg.Incus.InstanceType != "container" || cfg.Incus.Image != "images:debian/12/cloud" || cfg.Incus.Profile != "env-profile" || cfg.Incus.User != "crabuser" || cfg.Incus.WorkRoot != "/env/work" {
 		t.Fatalf("env incus identity config not applied: %#v", cfg.Incus)
 	}
-	if !cfg.Incus.DeleteOnRelease || cfg.Incus.StartTimeout != 5*time.Minute || cfg.Incus.LaunchPort != "2222" || cfg.Incus.ProxyListenPort != "2223" || cfg.Incus.ProxyDevice != "env-proxy" || !strings.HasSuffix(cfg.Incus.TLSServerCert, "/env-incus.crt") || cfg.Incus.InsecureTLS || cfg.Incus.RemoteImageServer != "https://env-images.example.test" {
+	if !cfg.Incus.DeleteOnRelease || cfg.Incus.StartTimeout != 5*time.Minute || cfg.Incus.LaunchPort != "2222" || cfg.Incus.ProxyListenPort != "2223" || cfg.Incus.ProxyDevice != "env-proxy" || cfg.Incus.TLSServerCert != filepath.Join(home, "env-incus.crt") || cfg.Incus.InsecureTLS || cfg.Incus.RemoteImageServer != "https://env-images.example.test" {
 		t.Fatalf("env incus runtime config not applied: %#v", cfg.Incus)
 	}
 }
@@ -6254,6 +6270,8 @@ func TestBlaxelConfigYAMLAndEnv(t *testing.T) {
 
 func TestNomadConfigYAMLAndEnv(t *testing.T) {
 	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
 	cfg := baseConfig()
 	var file fileConfig
 	yamlText := strings.Join([]string{
@@ -6288,7 +6306,6 @@ func TestNomadConfigYAMLAndEnv(t *testing.T) {
 	if err := applyFileConfig(&cfg, file); err != nil {
 		t.Fatal(err)
 	}
-	home, _ := os.UserHomeDir()
 	if cfg.Nomad.Address != "https://nomad-file.example.test:4646" ||
 		cfg.Nomad.Region != "file-region" ||
 		cfg.Nomad.Namespace != "file-namespace" ||
@@ -10066,32 +10083,28 @@ func TestConfigHelperBranches(t *testing.T) {
 	if file.Profile != "written" || file.Provider != "aws" {
 		t.Fatalf("file config=%#v", file)
 	}
-	info, err := os.Stat(cfgPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := info.Mode().Perm(); got != 0o600 {
-		t.Fatalf("config mode=%04o want 0600", got)
+	if got := configFilePermissionProblem(cfgPath); got != "" {
+		t.Fatalf("config permission problem=%q", got)
 	}
 
-	if err := os.Chmod(cfgPath, 0o644); err != nil {
-		t.Fatal(err)
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(cfgPath, 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if _, err := writeUserFileConfig(fileConfig{Profile: "rewritten"}); err != nil {
 		t.Fatal(err)
 	}
-	info, err = os.Stat(cfgPath)
-	if err != nil {
-		t.Fatal(err)
+	if got := configFilePermissionProblem(cfgPath); got != "" {
+		t.Fatalf("rewritten config permission problem=%q", got)
 	}
-	if got := info.Mode().Perm(); got != 0o600 {
-		t.Fatalf("rewritten config mode=%04o want 0600", got)
-	}
-	if err := os.Chmod(cfgPath, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if got := configFilePermissionProblem(cfgPath); got == "" {
-		t.Fatal("expected config permission problem")
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(cfgPath, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if got := configFilePermissionProblem(cfgPath); got == "" {
+			t.Fatal("expected config permission problem")
+		}
 	}
 	if got := configFilePermissionProblem(""); got != "" {
 		t.Fatalf("empty path permission problem=%q", got)
@@ -10099,8 +10112,10 @@ func TestConfigHelperBranches(t *testing.T) {
 	if got := configFilePermissionProblem(filepath.Join(t.TempDir(), "missing.yaml")); got != "" {
 		t.Fatalf("missing path permission problem=%q", got)
 	}
-	if err := os.Chmod(cfgPath, 0o600); err != nil {
-		t.Fatal(err)
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(cfgPath, 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if got := configFilePermissionProblem(cfgPath); got != "" {
 		t.Fatalf("secure config permission problem=%q", got)
@@ -10171,12 +10186,8 @@ func TestWriteUserFileConfigAtomic(t *testing.T) {
 		if file.Profile != "rewritten" || file.Provider != "aws" {
 			t.Fatalf("file config=%#v", file)
 		}
-		info, err := os.Stat(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got := info.Mode().Perm(); got != 0o600 {
-			t.Fatalf("config mode=%04o want 0600", got)
+		if err := verifySSHTransportPathPrivate(path, false); err != nil {
+			t.Fatalf("config is not private: %v", err)
 		}
 	})
 
@@ -10246,12 +10257,8 @@ func TestWriteUserFileConfigAtomic(t *testing.T) {
 		if file.Profile != "rewritten" || file.Provider != "aws" {
 			t.Fatalf("file config=%#v", file)
 		}
-		targetInfo, err := os.Stat(target)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got := targetInfo.Mode().Perm(); got != 0o600 {
-			t.Fatalf("target config mode=%04o want 0600", got)
+		if err := verifySSHTransportPathPrivate(target, false); err != nil {
+			t.Fatalf("target config is not private: %v", err)
 		}
 	})
 }
@@ -10261,6 +10268,7 @@ func TestConfigHelperErrorBranches(t *testing.T) {
 		t.Setenv("CRABBOX_CONFIG", "")
 		t.Setenv("XDG_CONFIG_HOME", "")
 		t.Setenv("HOME", "")
+		t.Setenv("APPDATA", "")
 		if _, err := writeUserFileConfig(fileConfig{Profile: "missing-home"}); err == nil {
 			t.Fatal("expected unavailable user config dir error")
 		}

@@ -91,10 +91,7 @@ func TestTestboxKeyPathAllowsSafeCustomIDs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	configDir, err := os.UserConfigDir()
-	if err != nil {
-		t.Fatal(err)
-	}
+	configDir := os.Getenv("XDG_CONFIG_HOME")
 	want := filepath.Join(configDir, "crabbox", "testboxes", "morphvm_123", "id_ed25519")
 	if path != want {
 		t.Fatalf("testboxKeyPath()=%q want %q", path, want)
@@ -117,10 +114,8 @@ func TestUseLeaseKnownHostsScopesAndEnforcesHostVerification(t *testing.T) {
 	if target.KnownHostsFile != want {
 		t.Fatalf("KnownHostsFile=%q want %q", target.KnownHostsFile, want)
 	}
-	if info, err := os.Stat(filepath.Dir(want)); err != nil {
-		t.Fatalf("stat lease SSH directory: %v", err)
-	} else if info.Mode().Perm()&0o077 != 0 {
-		t.Fatalf("lease SSH directory mode=%#o want private", info.Mode().Perm())
+	if err := verifySSHTransportPathPrivate(filepath.Dir(want), true); err != nil {
+		t.Fatalf("lease SSH directory is not private: %v", err)
 	}
 
 	args := strings.Join(sshBaseArgs(target), " ")
@@ -138,7 +133,7 @@ func TestUseLeaseKnownHostsScopesAndEnforcesHostVerification(t *testing.T) {
 
 func TestUseLeaseKnownHostsFailsClosedWhenDirectoryCannotBePrepared(t *testing.T) {
 	isolateTestUserDirs(t)
-	configDir, err := os.UserConfigDir()
+	configDir, err := userConfigDirectory()
 	if err != nil {
 		t.Fatal(err)
 	}
