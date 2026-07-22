@@ -1216,8 +1216,11 @@ func TestBootstrapKeyOnly(t *testing.T) {
 		t.Fatalf("bootstrap directories were reused: %s", trust.Dir)
 	}
 	info, err := os.Stat(trust.Dir)
-	if err != nil || info.Mode().Perm() != 0o700 {
+	if err != nil {
 		t.Fatalf("trust directory info=%#v err=%v", info, err)
+	}
+	if err := verifyLumePrivateDirectory(trust.Dir); err != nil {
+		t.Fatalf("trust directory permissions: %v", err)
 	}
 	for name, want := range (labels{
 		"challenge":      trust.Challenge,
