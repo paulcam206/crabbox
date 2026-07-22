@@ -854,6 +854,7 @@ func TestLocalRunArtifactPathUsesRepoRoot(t *testing.T) {
 }
 
 func TestRunArtifactCollectScriptExcludesEnvProfiles(t *testing.T) {
+	requirePOSIXShellTest(t)
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, ".crabbox", "env"), 0o755); err != nil {
 		t.Fatal(err)
@@ -900,6 +901,7 @@ func TestRunArtifactCollectScriptExcludesEnvProfiles(t *testing.T) {
 }
 
 func TestRunArtifactCollectScriptWarnsOnEmptyMatches(t *testing.T) {
+	requirePOSIXShellTest(t)
 	dir := t.TempDir()
 	archivePath := filepath.Join(dir, ".crabbox", "artifacts.tgz")
 	script := runArtifactCollectScript(dir, ".crabbox/artifacts.tgz", []string{".artifacts/missing/**"})
@@ -916,6 +918,7 @@ func TestRunArtifactCollectScriptWarnsOnEmptyMatches(t *testing.T) {
 }
 
 func TestRunArtifactRequireScriptMatchesRequiredArtifacts(t *testing.T) {
+	requirePOSIXShellTest(t)
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, "reports", "data", "nested"), 0o755); err != nil {
 		t.Fatal(err)
@@ -950,6 +953,7 @@ func TestRunArtifactRequireScriptMatchesRequiredArtifacts(t *testing.T) {
 }
 
 func TestRunArtifactRequireScriptFailsOnMissingArtifacts(t *testing.T) {
+	requirePOSIXShellTest(t)
 	dir := t.TempDir()
 	script := runArtifactRequireScript(dir, []string{"reports/data/manifest.json"})
 	out, err := exec.Command("bash", "-lc", script).CombinedOutput()
@@ -962,6 +966,7 @@ func TestRunArtifactRequireScriptFailsOnMissingArtifacts(t *testing.T) {
 }
 
 func TestRunArtifactRequireScriptSymlinkPolicy(t *testing.T) {
+	requirePOSIXShellTest(t)
 	for _, tt := range []struct {
 		name     string
 		glob     string
@@ -1041,6 +1046,7 @@ func TestRunArtifactRequireScriptSymlinkPolicy(t *testing.T) {
 }
 
 func TestRunArtifactCollectScriptSkipsDanglingSymlink(t *testing.T) {
+	requirePOSIXShellTest(t)
 	dir := t.TempDir()
 	artifactDir := filepath.Join(dir, ".artifacts")
 	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
@@ -1186,6 +1192,7 @@ func TestRunArtifactScriptsExcludeProtectedComponentsAtAnyDepth(t *testing.T) {
 }
 
 func TestRunArtifactCollectScriptRecursiveGlobIncludesZeroDepthMatches(t *testing.T) {
+	requirePOSIXShellTest(t)
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, ".artifacts", "nested"), 0o755); err != nil {
 		t.Fatal(err)
@@ -1211,6 +1218,7 @@ func TestRunArtifactCollectScriptRecursiveGlobIncludesZeroDepthMatches(t *testin
 }
 
 func TestRunArtifactCollectScriptRecursiveGlobPreservesPathSegments(t *testing.T) {
+	requirePOSIXShellTest(t)
 	dir := t.TempDir()
 	for _, path := range []string{
 		filepath.Join("foo", "bar"),
@@ -1520,7 +1528,6 @@ func TestRunCommandPresetProofArtifactE2E(t *testing.T) {
 	isolateRunTestUserDirs(t, dir)
 	cfgPath := filepath.Join(dir, ".crabbox.yaml")
 	proofPath := filepath.Join(dir, "proof.md")
-	sshPath := filepath.Join(dir, "ssh")
 	logPath := filepath.Join(dir, "ssh.log")
 	t.Setenv("CRABBOX_CONFIG", cfgPath)
 	t.Setenv("CRABBOX_FAKE_SSH_LOG", logPath)
@@ -1543,7 +1550,17 @@ func TestRunCommandPresetProofArtifactE2E(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("CRABBOX_FAKE_SSH_PORT", sshPort)
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	downloadedArtifacts := []byte("artifacts\n")
+	binDir := installWorkspaceOwnerScriptedSSH(t, dir, scriptedSSHBehavior{
+		MatchStdin: true,
+		Rules: []scriptedSSHRule{
+			{Contains: "base64 <", Stdout: encodedRunDownloadPayload(int64(len(downloadedArtifacts)), downloadedArtifacts)},
+			{Contains: "base64 -d >", Stdout: "ok      node             v22.1.0\nok      pnpm             9.0.0\nok      docker-compose   Docker Compose version v2.27.0\n"},
+			{Contains: "artifacts.tgz", Stdout: "warning: no artifact matches\n"},
+		},
+		Stdout: "Live harness ready: baseUrl=http://127.0.0.1:28008/\nscenario pass login-regression 33.8s\nsuite pass 4/4 total=81.2s\n",
+	})
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	if err := os.WriteFile(cfgPath, []byte(`
 profiles:
   liveqa:
@@ -1570,22 +1587,6 @@ profiles:
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	downloadedArtifacts := []byte("artifacts\n")
-	script := `#!/bin/sh
-cmd=""
-for arg do cmd="$arg"; done
-input="$(cat)"
-printf '%s\n%s\n---\n' "$cmd" "$input" >> "$CRABBOX_FAKE_SSH_LOG"
-case "$cmd
-$input" in
-  *"base64 <"*) printf '%s' ` + shellQuote(encodedRunDownloadPayload(int64(len(downloadedArtifacts)), downloadedArtifacts)) + `; exit 0 ;;
-  *"base64 -d >"*) printf 'ok      node             v22.1.0\nok      pnpm             9.0.0\nok      docker-compose   Docker Compose version v2.27.0\n'; exit 0 ;;
-  *"artifacts.tgz"*) printf 'warning: no artifact matches\n'; exit 0 ;;
-esac
-printf 'Live harness ready: baseUrl=http://127.0.0.1:28008/\nscenario pass login-regression 33.8s\nsuite pass 4/4 total=81.2s\n'
-exit 0
-`
-	installWorkspaceOwnerAwareSSH(t, sshPath, script)
 	var stdout, stderr bytes.Buffer
 	err = (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
 		"--provider", "run-env-profile-test",

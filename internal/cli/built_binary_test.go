@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 
@@ -29,6 +30,11 @@ func builtCLITestBinary() (string, error) {
 		}
 		cliTestBuild.dir = dir
 		binary := filepath.Join(dir, "crabbox")
+		if runtime.GOOS == "windows" {
+			// go build -o writes exactly this path; Windows exec needs the
+			// .exe extension to locate the binary by absolute path.
+			binary += ".exe"
+		}
 		build := exec.Command("go", "build", "-trimpath", "-o", binary, "./cmd/crabbox")
 		build.Dir = filepath.Join("..", "..")
 		if output, err := build.CombinedOutput(); err != nil {

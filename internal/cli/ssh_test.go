@@ -658,17 +658,9 @@ func TestWindowsPruneSeededSyncManifestDeletesSeededExtras(t *testing.T) {
 
 func TestSyncWindowsNativeFullResyncPrunesAfterGitSeed(t *testing.T) {
 	dir := t.TempDir()
-	sshPath := filepath.Join(dir, "ssh")
 	logPath := filepath.Join(dir, "ssh.log")
-	script := `#!/bin/sh
-printf 'ssh\n' >> "$CRABBOX_FAKE_SSH_LOG"
-cat >/dev/null
-exit 0
-`
-	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	binDir := installRecordingSSHExecutable(t, dir)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("CRABBOX_FAKE_SSH_LOG", logPath)
 
 	repoRoot := filepath.Join(dir, "repo")
@@ -712,7 +704,7 @@ exit 0
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := strings.Count(string(logData), "ssh\n"), 5; got != want {
+	if got, want := strings.Count(string(logData), "\n---\n"), 5; got != want {
 		t.Fatalf("ssh calls=%d want %d; log:\n%s", got, want, logData)
 	}
 
@@ -733,7 +725,7 @@ exit 0
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := strings.Count(string(logData), "ssh\n"), 2; got != want {
+	if got, want := strings.Count(string(logData), "\n---\n"), 2; got != want {
 		t.Fatalf("credential-blocked ssh calls=%d want %d; log:\n%s", got, want, logData)
 	}
 	if !strings.Contains(stderr.String(), "origin URL contains embedded credentials") {
@@ -1291,12 +1283,13 @@ func TestAllowedEnvDropsInvalidNames(t *testing.T) {
 
 func TestSSHArgsIncludeReliabilityOptions(t *testing.T) {
 	t.Setenv("HOME", "/tmp/crabbox-home")
-	got := strings.Join(sshArgs(SSHTarget{
+	target := SSHTarget{
 		User: "crabbox",
 		Host: "203.0.113.10",
 		Key:  "/tmp/crabbox-lease/id_ed25519",
 		Port: "2222",
-	}, "true"), "\n")
+	}
+	got := strings.Join(sshArgs(target, "true"), "\n")
 	for _, want := range []string{
 		"ConnectTimeout=10",
 		"ConnectionAttempts=3",
@@ -1306,13 +1299,19 @@ func TestSSHArgsIncludeReliabilityOptions(t *testing.T) {
 		"ForwardX11Trusted=no",
 		"ServerAliveInterval=15",
 		"ServerAliveCountMax=2",
-		"ControlMaster=auto",
-		"ControlPersist=10m",
-		"ControlPath=",
-		"crabbox-ssh-",
-		"-%C",
-		`UserKnownHostsFile=/tmp/crabbox-lease/known_hosts`,
+		"UserKnownHostsFile=" + sshConfigFileValue(knownHostsFile(target)),
 	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("sshArgs() missing %q in %q", want, got)
+		}
+	}
+	if runtime.GOOS == "windows" {
+		if !strings.Contains(got, "ControlMaster=no") {
+			t.Fatalf("sshArgs() should disable unsupported Windows multiplexing: %q", got)
+		}
+		return
+	}
+	for _, want := range []string{"ControlMaster=auto", "ControlPersist=10m", "ControlPath=", "crabbox-ssh-", "-%C"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("sshArgs() missing %q in %q", want, got)
 		}
@@ -1386,8 +1385,12 @@ func TestSSHArgsIncludeCertificateFile(t *testing.T) {
 	if !strings.Contains(got, "UserKnownHostsFile=/tmp/tenki/known_hosts_session") {
 		t.Fatalf("sshArgs() missing KnownHostsFile: %q", got)
 	}
-	if !strings.Contains(got, "ControlMaster=auto") {
-		t.Fatalf("sshArgs() should keep ControlMaster enabled for cert auth: %q", got)
+	wantControlMaster := "ControlMaster=auto"
+	if runtime.GOOS == "windows" {
+		wantControlMaster = "ControlMaster=no"
+	}
+	if !strings.Contains(got, wantControlMaster) {
+		t.Fatalf("sshArgs() missing %s for cert auth: %q", wantControlMaster, got)
 	}
 }
 
@@ -1518,31 +1521,12 @@ exit 7
 
 func TestRunSSHStreamResolvesFallbackBeforeExecution(t *testing.T) {
 	dir := t.TempDir()
-	sshPath := filepath.Join(dir, "ssh")
 	callsPath := filepath.Join(dir, "calls")
-	script := `#!/bin/sh
-port=""
-remote=""
-while [ "$#" -gt 0 ]; do
-  if [ "$1" = "-p" ]; then
-    shift
-    port="$1"
-  fi
-  remote="$1"
-  shift
-done
-printf '%s:%s\n' "$port" "$remote" >> "$CRABBOX_FAKE_SSH_CALLS"
-if [ "$port" = "2222" ]; then
-  printf 'failed primary probe\n' >&2
-  exit 255
-fi
-printf 'ok\n'
-exit 0
-`
-	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	binDir := installScriptedSSHExecutable(t, dir, scriptedSSHBehavior{
+		Rules:  []scriptedSSHRule{{Port: "2222", Stderr: "failed primary probe\n", ExitCode: 255}},
+		Stdout: "ok\n",
+	})
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("CRABBOX_FAKE_SSH_CALLS", callsPath)
 
 	var stdout, stderr bytes.Buffer
@@ -1881,27 +1865,11 @@ func TestSSHMuxFailureDetectorRequiresExactDiagnosticAcrossWrites(t *testing.T) 
 
 func TestWaitForSSHReadyRecordsProxyFallbackPort(t *testing.T) {
 	dir := t.TempDir()
-	sshPath := filepath.Join(dir, "ssh")
 	portsPath := filepath.Join(dir, "ports")
-	script := `#!/bin/sh
-port=""
-while [ "$#" -gt 0 ]; do
-  if [ "$1" = "-p" ]; then
-    shift
-    port="$1"
-  fi
-  shift
-done
-printf '%s\n' "$port" >> "$CRABBOX_FAKE_SSH_PORTS"
-if [ "$port" = "2222" ]; then
-  exit 255
-fi
-exit 0
-`
-	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	binDir := installScriptedSSHExecutable(t, dir, scriptedSSHBehavior{
+		Rules: []scriptedSSHRule{{Port: "2222", ExitCode: 255}},
+	})
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("CRABBOX_FAKE_SSH_PORTS", portsPath)
 
 	target := SSHTarget{
@@ -2457,14 +2425,8 @@ func TestWaitForSSHReadyPreservesCancellationCauseDuringBackoff(t *testing.T) {
 	// Prove cancel is observed during the inter-attempt backoff, not only at
 	// the top of the loop. Fake ssh always fails so wait enters the sleep.
 	dir := t.TempDir()
-	sshPath := filepath.Join(dir, "ssh")
-	script := `#!/bin/sh
-exit 255
-`
-	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	binDir := installScriptedSSHExecutable(t, dir, scriptedSSHBehavior{ExitCode: 255})
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	target := SSHTarget{
 		User:           "crabbox",
@@ -2507,27 +2469,11 @@ exit 255
 
 func TestWaitForLoopbackVNCRecordsResolvedFallbackPort(t *testing.T) {
 	dir := t.TempDir()
-	sshPath := filepath.Join(dir, "ssh")
 	portsPath := filepath.Join(dir, "ports")
-	script := `#!/bin/sh
-port=""
-while [ "$#" -gt 0 ]; do
-  if [ "$1" = "-p" ]; then
-    shift
-    port="$1"
-  fi
-  shift
-done
-printf '%s\n' "$port" >> "$CRABBOX_FAKE_SSH_PORTS"
-if [ "$port" = "2222" ]; then
-  exit 255
-fi
-exit 0
-`
-	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	binDir := installScriptedSSHExecutable(t, dir, scriptedSSHBehavior{
+		Rules: []scriptedSSHRule{{Port: "2222", ExitCode: 255}},
+	})
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("CRABBOX_FAKE_SSH_PORTS", portsPath)
 
 	target := SSHTarget{
@@ -2560,15 +2506,8 @@ func (failingWriter) Write([]byte) (int, error) {
 
 func TestRunSSHStreamResultReturnsWriterErrors(t *testing.T) {
 	dir := t.TempDir()
-	sshPath := filepath.Join(dir, "ssh")
-	script := `#!/bin/sh
-printf 'hello\n'
-exit 0
-`
-	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	binDir := installScriptedSSHExecutable(t, dir, scriptedSSHBehavior{Stdout: "hello\n"})
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	code, err := runSSHStreamResult(context.Background(), SSHTarget{
 		User: "crabbox",
@@ -2652,13 +2591,15 @@ func TestSSHReadyCommandUsesAbsoluteCrabboxReadyPath(t *testing.T) {
 }
 
 func TestSSHArgsQuoteKnownHostsPathWithSpaces(t *testing.T) {
-	got := strings.Join(sshArgs(SSHTarget{
+	target := SSHTarget{
 		User: "crabbox",
 		Host: "203.0.113.10",
 		Key:  "/tmp/Application Support/crabbox/id_ed25519",
 		Port: "2222",
-	}, "true"), "\n")
-	if !strings.Contains(got, `UserKnownHostsFile="/tmp/Application Support/crabbox/known_hosts"`) {
+	}
+	got := strings.Join(sshArgs(target, "true"), "\n")
+	want := "UserKnownHostsFile=" + sshConfigFileValue(knownHostsFile(target))
+	if !strings.Contains(got, want) {
 		t.Fatalf("sshArgs() should quote known_hosts path with spaces: %q", got)
 	}
 }
@@ -2907,12 +2848,9 @@ func TestNormalizeRsyncOptionsNoTimesForcesChecksum(t *testing.T) {
 func TestRsyncFilesFromUsesAuthoritativeManifestWithoutExcludes(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "rsync.log")
-	rsyncPath := filepath.Join(dir, "rsync")
-	if err := os.WriteFile(rsyncPath, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$CRABBOX_FAKE_RSYNC_LOG\"\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("CRABBOX_FAKE_RSYNC_LOG", logPath)
+	binDir := installRecordingSSHExecutable(t, dir)
+	installRecordingTestTool(t, binDir, "rsync", logPath)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	target := SSHTarget{Host: "example.test", User: "runner", Port: "22"}
 	err := rsync(
 		context.Background(),
@@ -3013,6 +2951,7 @@ func TestRemotePruneSyncManifestForWSL2UsesShortCoreutils(t *testing.T) {
 }
 
 func TestRemoteSeedSyncManifestFromGitWritesInitialTrackedManifest(t *testing.T) {
+	requirePOSIXShellTest(t)
 	workdir := t.TempDir()
 	run := func(args ...string) {
 		t.Helper()
@@ -3042,6 +2981,7 @@ func TestRemoteSeedSyncManifestFromGitWritesInitialTrackedManifest(t *testing.T)
 }
 
 func TestRemotePruneSyncManifestPrunesManagedFiles(t *testing.T) {
+	requirePOSIXShellTest(t)
 	testRemotePruneSyncManifestPrunesManagedFiles(t, remotePruneSyncManifest)
 }
 
@@ -3107,6 +3047,7 @@ func testRemotePruneSyncManifestPrunesManagedFiles(t *testing.T, command func(st
 }
 
 func TestRemotePruneSyncManifestFallsBackToPerlWithoutPython(t *testing.T) {
+	requirePOSIXShellTest(t)
 	workdir := t.TempDir()
 	mustWriteTestFile(t, filepath.Join(workdir, ".crabbox", "sync-manifest"), "keep.txt\x00stale.txt\x00")
 	mustWriteTestFile(t, filepath.Join(workdir, ".crabbox", remoteSyncPendingManifestName("0123456789abcdef0123456789abcdef")), "keep.txt\x00")
@@ -3142,6 +3083,7 @@ func TestRemotePruneSyncManifestFallsBackToPerlWithoutPython(t *testing.T) {
 }
 
 func TestRemotePruneSyncManifestFailsClosedWhenInterpreterFails(t *testing.T) {
+	requirePOSIXShellTest(t)
 	workdir := t.TempDir()
 	mustWriteTestFile(t, filepath.Join(workdir, ".crabbox", "sync-manifest"), "stale.txt\x00")
 	mustWriteTestFile(t, filepath.Join(workdir, ".crabbox", remoteSyncPendingManifestName("0123456789abcdef0123456789abcdef")), "")
@@ -3191,6 +3133,7 @@ func TestRemoteApplySyncManifestOnlyCommitsManifest(t *testing.T) {
 }
 
 func TestRemoteFinalizeSyncCommitsMetadataInOneCommand(t *testing.T) {
+	requirePOSIXShellTest(t)
 	const finalizeToken = "0123456789abcdef0123456789abcdef"
 	workdir := t.TempDir()
 	metaDir := filepath.Join(workdir, ".crabbox")
@@ -5508,6 +5451,7 @@ func TestGitSeedCommandsRejectCredentialBearingRemote(t *testing.T) {
 }
 
 func TestRemoteGitSeedLocalCanary(t *testing.T) {
+	requirePOSIXShellTest(t)
 	root := t.TempDir()
 	source := filepath.Join(root, "source")
 	if err := os.Mkdir(source, 0o755); err != nil {
@@ -5700,6 +5644,7 @@ func TestRemoteWriteSyncDeletedNew(t *testing.T) {
 }
 
 func TestRemoteWriteSyncManifestsNew(t *testing.T) {
+	requirePOSIXShellTest(t)
 	const finalizeToken = "0123456789abcdef0123456789abcdef"
 	workdir := t.TempDir()
 	manifest := "keep.txt\x00binary\xff\x00"
@@ -5970,6 +5915,7 @@ func TestRemoteWriteSyncManifestsNewDoesNotWaitForEOF(t *testing.T) {
 }
 
 func TestRemoteWriteSyncManifestsNewPython(t *testing.T) {
+	requirePOSIXShellTest(t)
 	const finalizeToken = "0123456789abcdef0123456789abcdef"
 	workdir := t.TempDir()
 	manifest := strings.Repeat("manifest-entry\x00", 4096)
@@ -5998,6 +5944,7 @@ func TestRemoteWriteSyncManifestsNewPython(t *testing.T) {
 }
 
 func TestRemoteWriteSyncManifestsNewReadsChunkedInput(t *testing.T) {
+	requirePOSIXShellTest(t)
 	const finalizeToken = "0123456789abcdef0123456789abcdef"
 	workdir := t.TempDir()
 	manifest := strings.Repeat("manifest-entry\x00", 4096)
@@ -6092,6 +6039,7 @@ func mustWriteTestFailingCommand(t *testing.T, dir, name string, code int) {
 }
 
 func TestRemoteSyncMetadataUsesGitDirForGitWorktree(t *testing.T) {
+	requirePOSIXShellTest(t)
 	workdir := t.TempDir()
 	runGit(t, workdir, "init")
 	cmd := exec.Command("bash", "-lc", remoteWriteSyncManifestNew(workdir))

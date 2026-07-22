@@ -367,42 +367,25 @@ func TestStopDefersUnsafeLocalConnectionCleanupUntilRelease(t *testing.T) {
 func installRecordingSSH(t *testing.T, dir string) string {
 	t.Helper()
 	logPath := filepath.Join(dir, "ssh.log")
-	sshPath := filepath.Join(dir, "ssh")
-	script := `#!/bin/sh
-cmd=""
-for arg do cmd="$arg"; done
-decoded=""
-case "$cmd" in
-  *'payload_b64="'*'"; decoded=; if command -v base64'*)
-    payload_b64=${cmd#*'payload_b64="'}
-    payload_b64=${payload_b64%%'"; decoded=; if command -v base64'*}
-    decoded=$(printf %s "$payload_b64" | /usr/bin/base64 --decode 2>/dev/null) ||
-      decoded=$(printf %s "$payload_b64" | /usr/bin/base64 -d 2>/dev/null) ||
-      decoded=$(printf %s "$payload_b64" | /usr/bin/base64 -D 2>/dev/null) || decoded=""
-    ;;
-esac
-printf '%s\n%s\n---\n' "$cmd" "$decoded" >> "$CRABBOX_FAKE_SSH_LOG"
-match=$cmd
-if [ -n "$decoded" ]; then match=$decoded; fi
-case "$match" in
-  *"protocol_action='acquire'"*) printf ACQUIRED; exit 0 ;;
-  *"protocol_action='renew'"*) printf RENEWED; exit 0 ;;
-  *"protocol_action='inspect'"*) printf OWNED; exit 0 ;;
-  *"protocol_action='release'"*) printf RELEASED; exit 0 ;;
-esac
-if [ -n "${CRABBOX_FAKE_SSH_STDIN_LOG:-}" ]; then
-  /bin/cat >> "$CRABBOX_FAKE_SSH_STDIN_LOG" || true
-else
-  /bin/cat >/dev/null || true
-fi
-exit 0
-`
-	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", dir)
+	binDir := installScriptedSSHExecutable(t, dir, scriptedSSHBehavior{
+		DecodePayload:          true,
+		WorkspaceOwnerProtocol: true,
+	})
+	t.Setenv("PATH", binDir)
 	t.Setenv("CRABBOX_FAKE_SSH_LOG", logPath)
 	return logPath
+}
+
+// installWorkspaceOwnerScriptedSSH is the portable counterpart of
+// installWorkspaceOwnerAwareSSH: it answers the same workspace-owner handshake
+// and passes configuration queries through to the real client, but runs as a
+// real executable so the fixture works on hosts without a POSIX shell.
+func installWorkspaceOwnerScriptedSSH(t *testing.T, dir string, behavior scriptedSSHBehavior) string {
+	t.Helper()
+	behavior.ConfigQueryPassthrough = true
+	behavior.DecodePayload = true
+	behavior.WorkspaceOwnerProtocol = true
+	return installScriptedSSHExecutable(t, dir, behavior)
 }
 
 func installWorkspaceOwnerAwareSSH(t *testing.T, sshPath, commandScript string) {
@@ -3168,10 +3151,9 @@ func startTCPReadinessFixture(t *testing.T) string {
 func TestRunCommandTimingJSONRemainsFinalLineWithCleanup(t *testing.T) {
 	dir := t.TempDir()
 	isolateRunTestUserDirs(t, dir)
-	sshPath := filepath.Join(dir, "ssh")
 	sshPort := startTCPReadinessFixture(t)
-	installWorkspaceOwnerAwareSSH(t, sshPath, "#!/bin/sh\nexit 0\n")
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	binDir := installWorkspaceOwnerScriptedSSH(t, dir, scriptedSSHBehavior{})
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("CRABBOX_FAKE_SSH_PORT", sshPort)
 	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, ".crabbox.yaml"))
 
@@ -3206,7 +3188,7 @@ func TestRunCommandTimingJSONRemainsFinalLineWithCleanup(t *testing.T) {
 func TestRunCommandTimingJSONSurfacesCleanupFailure(t *testing.T) {
 	dir := t.TempDir()
 	isolateRunTestUserDirs(t, dir)
-	sshPath := filepath.Join(dir, "ssh")
+	binDir := installWorkspaceOwnerScriptedSSH(t, dir, scriptedSSHBehavior{})
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -3225,8 +3207,7 @@ func TestRunCommandTimingJSONSurfacesCleanupFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	installWorkspaceOwnerAwareSSH(t, sshPath, "#!/bin/sh\nexit 0\n")
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("CRABBOX_FAKE_SSH_PORT", sshPort)
 	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, ".crabbox.yaml"))
 	runEnvProfileTestReleaseErr = errors.New("release API unavailable")
@@ -3260,7 +3241,6 @@ func TestRunCommandTimingJSONSurfacesCleanupFailure(t *testing.T) {
 func TestRunCommandRequireArtifactFailsAfterSuccessfulCommand(t *testing.T) {
 	dir := t.TempDir()
 	isolateRunTestUserDirs(t, dir)
-	sshPath := filepath.Join(dir, "ssh")
 	logPath := filepath.Join(dir, "ssh.log")
 	downloadPath := filepath.Join(dir, "manifest.json")
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -3282,19 +3262,12 @@ func TestRunCommandRequireArtifactFailsAfterSuccessfulCommand(t *testing.T) {
 		t.Fatal(err)
 	}
 	downloaded := []byte("downloaded\n")
-	script := `#!/bin/sh
-cmd=""
-for arg do cmd="$arg"; done
-printf '%s\n---\n' "$cmd" >> "$CRABBOX_FAKE_SSH_LOG"
-case "$cmd" in
-  *"base64 <"*) printf '%s' ` + shellQuote(encodedRunDownloadPayload(int64(len(downloaded)), downloaded)) + `; exit 0 ;;
-  *"check_artifact_file()"*) printf 'missing required artifact: reports/data/manifest.json\n' >&2; exit 8 ;;
-  *"fixture-stage-success"*) printf 'CRABBOX_PHASE:install\npnpm install --package-import-method=copy completed\nCRABBOX_PHASE:test\n'; exit 0 ;;
-esac
-exit 0
-`
-	installWorkspaceOwnerAwareSSH(t, sshPath, script)
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	binDir := installWorkspaceOwnerScriptedSSH(t, dir, scriptedSSHBehavior{Rules: []scriptedSSHRule{
+		{Contains: "base64 <", Stdout: encodedRunDownloadPayload(int64(len(downloaded)), downloaded)},
+		{Contains: "check_artifact_file()", Stderr: "missing required artifact: reports/data/manifest.json\n", ExitCode: 8},
+		{Contains: "fixture-stage-success", Stdout: "CRABBOX_PHASE:install\npnpm install --package-import-method=copy completed\nCRABBOX_PHASE:test\n"},
+	}})
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("CRABBOX_FAKE_SSH_LOG", logPath)
 	t.Setenv("CRABBOX_FAKE_SSH_PORT", sshPort)
 	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, ".crabbox.yaml"))
@@ -4892,6 +4865,7 @@ exec sh -c "$cmd"
 }
 
 func TestDelegatedRunArtifactScriptSkipsSlashNormalizedMatches(t *testing.T) {
+	requirePOSIXShellTest(t)
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, "etc"), 0o755); err != nil {
 		t.Fatal(err)
@@ -4938,6 +4912,7 @@ done
 }
 
 func TestDelegatedRunArtifactScriptRejectsDanglingRequiredArtifact(t *testing.T) {
+	requirePOSIXShellTest(t)
 	dir := t.TempDir()
 	t.Chdir(dir)
 	if err := os.MkdirAll(filepath.Join("reports", "data"), 0o755); err != nil {
@@ -4984,8 +4959,7 @@ func TestDelegatedRunArtifactScriptRejectsIntermediateSymlinkRoot(t *testing.T) 
 func TestRunCommandCleansEnvProfileWhenProbeFails(t *testing.T) {
 	dir := t.TempDir()
 	isolateRunTestUserDirs(t, dir)
-	sshPath := filepath.Join(dir, "ssh")
-	logPath := filepath.Join(dir, "ssh.log")
+	logPath := installRecordingSSH(t, dir)
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -5004,22 +4978,8 @@ func TestRunCommandCleansEnvProfileWhenProbeFails(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	script := `#!/bin/sh
-cmd=""
-for arg do
-  cmd="$arg"
-done
-printf '%s\n---\n' "$cmd" >> "$CRABBOX_FAKE_SSH_LOG"
-case "$cmd" in
-  *"secret=true"*) exit 9 ;;
-esac
-exit 0
-`
-	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("CRABBOX_FAKE_SSH_LOG", logPath)
+	t.Setenv("CRABBOX_FAKE_SSH_FAIL_MATCH", "secret=true")
+	t.Setenv("CRABBOX_FAKE_SSH_FAIL_CODE", "9")
 	t.Setenv("CRABBOX_FAKE_SSH_PORT", sshPort)
 	profile := filepath.Join(dir, "env.profile")
 	if err := os.WriteFile(profile, []byte("API_TOKEN=secret\n"), 0600); err != nil {
@@ -5052,21 +5012,12 @@ exit 0
 func TestRunCommandHardFailsMissingJSRuntimeBeforeCommand(t *testing.T) {
 	dir := t.TempDir()
 	isolateRunTestUserDirs(t, dir)
-	sshPath := filepath.Join(dir, "ssh")
 	logPath := filepath.Join(dir, "ssh.log")
-	script := `#!/bin/sh
-cmd=""
-for arg do
-  cmd="$arg"
-done
-printf '%s\n---\n' "$cmd" >> "$CRABBOX_FAKE_SSH_LOG"
-case "$cmd" in
-  *"command -v"*) printf '` + missingRemoteToolPrefix + `pnpm\n' ;;
-esac
-exit 0
-`
-	installWorkspaceOwnerAwareSSH(t, sshPath, script)
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	binDir := installWorkspaceOwnerScriptedSSH(t, dir, scriptedSSHBehavior{Rules: []scriptedSSHRule{{
+		Contains: "command -v",
+		Stdout:   missingRemoteToolPrefix + "pnpm\n",
+	}}})
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("CRABBOX_FAKE_SSH_LOG", logPath)
 	t.Setenv("CRABBOX_FAKE_SSH_PORT", "22")
 	t.Setenv("CRABBOX_FAKE_SSH_PROXY", "1")
@@ -5112,8 +5063,6 @@ func TestRunCommandKeepOnFailureKeepsLeaseAfterLocalActionsHydrationFailure(t *t
 	clearConfigEnv(t)
 	dir := t.TempDir()
 	isolateRunTestUserDirs(t, dir)
-	sshPath := filepath.Join(dir, "ssh")
-	rsyncPath := filepath.Join(dir, "rsync")
 	logPath := filepath.Join(dir, "ssh.log")
 	configPath := filepath.Join(dir, ".crabbox.yaml")
 	if err := os.WriteFile(configPath, []byte(`actions:
@@ -5121,29 +5070,18 @@ func TestRunCommandKeepOnFailureKeepsLeaseAfterLocalActionsHydrationFailure(t *t
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	script := `#!/bin/sh
-cmd=""
-for arg do
-  cmd="$arg"
-done
-printf '%s\n---\n' "$cmd" >> "$CRABBOX_FAKE_SSH_LOG"
-case "$cmd" in
-  *"nohup sh -c"*) printf '123\n'; exit 0 ;;
-  *"kill -0 '123'"*) printf 'exit=unknown\nno marker written\n'; exit 0 ;;
-esac
-exit 0
-`
-	installWorkspaceOwnerAwareSSH(t, sshPath, script)
-	if err := os.WriteFile(rsyncPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	binDir := installWorkspaceOwnerScriptedSSH(t, dir, scriptedSSHBehavior{Rules: []scriptedSSHRule{
+		{Contains: "nohup sh -c", Stdout: "123\n"},
+		{Contains: "kill -0 '123'", Stdout: "exit=unknown\nno marker written\n"},
+	}})
+	installSuccessfulTestTool(t, binDir, "rsync")
 	releases := 0
 	runEnvProfileTestReleaseHook = func() error {
 		releases++
 		return nil
 	}
 	t.Cleanup(func() { runEnvProfileTestReleaseHook = nil })
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("CRABBOX_CONFIG", configPath)
 	t.Setenv("CRABBOX_FAKE_SSH_LOG", logPath)
 	t.Setenv("CRABBOX_FAKE_SSH_PORT", "22")
@@ -5173,23 +5111,12 @@ exit 0
 func TestRunCommandSyncOnlyIgnoresJSCommandRuntime(t *testing.T) {
 	dir := t.TempDir()
 	isolateRunTestUserDirs(t, dir)
-	sshPath := filepath.Join(dir, "ssh")
 	logPath := filepath.Join(dir, "ssh.log")
-	script := `#!/bin/sh
-cmd=""
-for arg do
-  cmd="$arg"
-done
-printf '%s\n---\n' "$cmd" >> "$CRABBOX_FAKE_SSH_LOG"
-case "$cmd" in
-  *"command -v"*) printf 'pnpm\n' ;;
-esac
-exit 0
-`
-	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	binDir := installScriptedSSHExecutable(t, dir, scriptedSSHBehavior{Rules: []scriptedSSHRule{{
+		Contains: "command -v",
+		Stdout:   "pnpm\n",
+	}}})
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("CRABBOX_FAKE_SSH_LOG", logPath)
 	t.Setenv("CRABBOX_FAKE_SSH_PORT", "22")
 	t.Setenv("CRABBOX_FAKE_SSH_PROXY", "1")
@@ -5271,23 +5198,12 @@ func TestRunCommandEmptyReplacementLists(t *testing.T) {
 func TestRunCommandSkipsJSRuntimePreflightWithForwardedPATH(t *testing.T) {
 	dir := t.TempDir()
 	isolateRunTestUserDirs(t, dir)
-	sshPath := filepath.Join(dir, "ssh")
 	logPath := filepath.Join(dir, "ssh.log")
-	script := `#!/bin/sh
-cmd=""
-for arg do
-  cmd="$arg"
-done
-printf '%s\n---\n' "$cmd" >> "$CRABBOX_FAKE_SSH_LOG"
-case "$cmd" in
-  *"command -v"*) printf '` + missingRemoteToolPrefix + `pnpm\n' ;;
-esac
-exit 0
-`
-	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	binDir := installScriptedSSHExecutable(t, dir, scriptedSSHBehavior{Rules: []scriptedSSHRule{{
+		Contains: "command -v",
+		Stdout:   missingRemoteToolPrefix + "pnpm\n",
+	}}})
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("CRABBOX_FAKE_SSH_LOG", logPath)
 	t.Setenv("CRABBOX_FAKE_SSH_PORT", "22")
 	t.Setenv("CRABBOX_FAKE_SSH_PROXY", "1")
@@ -5330,16 +5246,9 @@ func TestValidateRunEnvHelperTargetRejectsNativeWindows(t *testing.T) {
 func TestRunCommandRejectsWindowsEnvHelperBeforeRemoteCommands(t *testing.T) {
 	dir := t.TempDir()
 	isolateRunTestUserDirs(t, dir)
-	sshPath := filepath.Join(dir, "ssh")
 	logPath := filepath.Join(dir, "ssh.log")
-	script := `#!/bin/sh
-printf 'ssh called\n' >> "$CRABBOX_FAKE_SSH_LOG"
-exit 0
-`
-	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	binDir := installScriptedSSHExecutable(t, dir, scriptedSSHBehavior{})
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("CRABBOX_FAKE_SSH_LOG", logPath)
 	profile := filepath.Join(dir, "env.profile")
 	if err := os.WriteFile(profile, []byte("API_TOKEN=secret\n"), 0600); err != nil {
@@ -7114,6 +7023,7 @@ func TestDelegatedPreflightPrintsUnsupportedMessage(t *testing.T) {
 }
 
 func TestRemoteFailureCaptureCommandAvoidsDuplicateDirectoryChildren(t *testing.T) {
+	requirePOSIXShellTest(t)
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("bash is required for POSIX capture command test")
 	}
@@ -7569,6 +7479,7 @@ func TestCleanupRemoteFailureCaptureUsesBoundedUncancelledContext(t *testing.T) 
 }
 
 func TestRemoteRemoveFailureCaptureCommandRemovesBundle(t *testing.T) {
+	requirePOSIXShellTest(t)
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("bash is required for POSIX cleanup command test")
 	}
@@ -7675,6 +7586,7 @@ func TestFailureEnvSummaryRedactsSecretValues(t *testing.T) {
 }
 
 func TestWriteLocalFailureBundleIncludesMetadataStreamsAndRemoteFiles(t *testing.T) {
+	requirePOSIXShellTest(t)
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("bash is required for POSIX capture command test")
 	}

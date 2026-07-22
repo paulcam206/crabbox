@@ -3,6 +3,7 @@ package applevmhelper
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -103,6 +104,9 @@ func TestSanitizeDiagnosticTextEscapesTerminalControls(t *testing.T) {
 }
 
 func TestEnsurePrivateDirTightensExistingPermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not expose POSIX directory mode bits")
+	}
 	path := filepath.Join(t.TempDir(), "state")
 	if err := os.Mkdir(path, 0o755); err != nil {
 		t.Fatal(err)

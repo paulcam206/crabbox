@@ -136,7 +136,7 @@ func TestRescueCommandsCarryExternalPrivateRouting(t *testing.T) {
 		for _, want := range []string{
 			"--provider external",
 			"--target macos",
-			"--external-routing-file " + routingPath,
+			"--external-routing-file " + shellQuote(routingPath),
 			"--external-routing-digest " + ExternalRoutingDigest(loadedRouting),
 			"--external-desktop-username screen-user",
 			"--external-desktop-password-env SCREEN_SHARING_PASSWORD",
