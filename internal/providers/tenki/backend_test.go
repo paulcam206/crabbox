@@ -3,6 +3,7 @@ package tenki
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -15,6 +16,15 @@ import (
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
+
+func mustJSON(t *testing.T, value any) string {
+	t.Helper()
+	data, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
 
 func TestTenkiProviderSpec(t *testing.T) {
 	spec := Provider{}.Spec()
@@ -478,7 +488,15 @@ func TestTenkiResolveReadyProbePreparesSSH(t *testing.T) {
 		case "sandbox list --output json --tags crabbox,crabbox-provider-tenki":
 			return LocalCommandResult{Stdout: `[{"id":"session-1","name":"crabbox-blue","state":"RUNNING","metadata":{"crabbox_provider":"tenki","crabbox_lease_id":"cbx_123","crabbox_slug":"blue"},"tags":["crabbox-provider-tenki"]}]`}, nil
 		case "sandbox ssh-command --output json --session session-1 --user tenki --batch-mode --connect-timeout 10s":
-			return LocalCommandResult{Stdout: `{"session_id":"session-1","user":"tenki","host":"sandbox","port":22,"identity_file":"` + keyPath + `","certificate_file":"` + certPath + `","proxy_command":"tenki sandbox ssh-proxy --session session-1"}`}, nil
+			return LocalCommandResult{Stdout: mustJSON(t, tenkiSSHCommandOutput{
+				SessionID:       "session-1",
+				User:            "tenki",
+				Host:            "sandbox",
+				Port:            22,
+				IdentityFile:    keyPath,
+				CertificateFile: certPath,
+				ProxyCommand:    "tenki sandbox ssh-proxy --session session-1",
+			})}, nil
 		default:
 			t.Fatalf("unexpected command: %s %s", req.Name, strings.Join(req.Args, " "))
 		}
@@ -590,7 +608,15 @@ func TestTenkiResolveReclaimPersistsSessionEndpoint(t *testing.T) {
 		case "sandbox get --output json session-1":
 			return LocalCommandResult{Stdout: `{"id":"session-1","name":"unmanaged","state":"RUNNING"}`}, nil
 		case "sandbox ssh-command --output json --session session-1 --user tenki --batch-mode --connect-timeout 10s":
-			return LocalCommandResult{Stdout: `{"session_id":"session-1","user":"tenki","host":"sandbox","port":22,"identity_file":"` + keyPath + `","certificate_file":"` + certPath + `","proxy_command":"tenki proxy session-1"}`}, nil
+			return LocalCommandResult{Stdout: mustJSON(t, tenkiSSHCommandOutput{
+				SessionID:       "session-1",
+				User:            "tenki",
+				Host:            "sandbox",
+				Port:            22,
+				IdentityFile:    keyPath,
+				CertificateFile: certPath,
+				ProxyCommand:    "tenki proxy session-1",
+			})}, nil
 		default:
 			t.Fatalf("unexpected command: %s %s", req.Name, command)
 		}
@@ -884,7 +910,8 @@ func TestTenkiSSHTargetUsesProxyCommand(t *testing.T) {
 	if target.NoControlMaster || target.DisableHostKeyChecking {
 		t.Fatalf("tenki target should keep SSH mux and host-key checks enabled: %#v", target)
 	}
-	if target.KnownHostsFile != "/tmp/known_hosts_00000000-0000-0000-0000-000000000001" {
+	wantKnownHosts := filepath.Join(filepath.Dir("/tmp/id_ed25519"), "known_hosts_00000000-0000-0000-0000-000000000001")
+	if target.KnownHostsFile != wantKnownHosts {
 		t.Fatalf("known_hosts=%q", target.KnownHostsFile)
 	}
 	for _, want := range []string{
@@ -1133,7 +1160,15 @@ func TestTenkiWaitForSSHCommandUsesStructuredOutput(t *testing.T) {
 		runner.calls = append(runner.calls, req)
 		switch strings.Join(req.Args, " ") {
 		case "sandbox ssh-command --output json --session session-1 --user tenki --batch-mode --connect-timeout 10s":
-			return LocalCommandResult{Stdout: `{"session_id":"session-1","user":"tenki","host":"sandbox","port":22,"identity_file":"` + keyPath + `","certificate_file":"` + certPath + `","proxy_command":"tenki sandbox ssh-proxy --session session-1"}`}, nil
+			return LocalCommandResult{Stdout: mustJSON(t, tenkiSSHCommandOutput{
+				SessionID:       "session-1",
+				User:            "tenki",
+				Host:            "sandbox",
+				Port:            22,
+				IdentityFile:    keyPath,
+				CertificateFile: certPath,
+				ProxyCommand:    "tenki sandbox ssh-proxy --session session-1",
+			})}, nil
 		default:
 			t.Fatalf("unexpected command: %s %s", req.Name, strings.Join(req.Args, " "))
 		}

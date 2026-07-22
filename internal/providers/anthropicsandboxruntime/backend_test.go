@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
@@ -158,6 +159,10 @@ func TestRunBuildsSRTCommandAndStreamsOutput(t *testing.T) {
 	cfg.AnthropicSRT.Settings = ".crabbox/srt-settings.json"
 	cfg.AnthropicSRT.Debug = true
 	runner := &recordingRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
+		// Consume more than the host clock's granularity so the recorded
+		// durations are observable. Windows' monotonic clock ticks about every
+		// 0.5ms, so an instantaneous fake command measures exactly zero there.
+		time.Sleep(20 * time.Millisecond)
 		if req.Stdout != nil {
 			_, _ = io.WriteString(req.Stdout, "ok\n")
 		}
@@ -175,7 +180,7 @@ func TestRunBuildsSRTCommandAndStreamsOutput(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run err=%v", err)
 	}
-	if result.Provider != providerName || !result.SyncDelegated || result.ExitCode != 0 || result.Command <= 0 || result.Total <= 0 {
+	if result.Provider != providerName || !result.SyncDelegated || result.ExitCode != 0 || result.Command <= 0 || result.Total < result.Command {
 		t.Fatalf("result=%#v", result)
 	}
 	if result.Status != core.RunStatusSucceeded || result.ErrorKind != core.RunErrorNone {

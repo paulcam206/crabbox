@@ -1486,11 +1486,6 @@ func TestAcquirePreservesKeyWhenRollbackFails(t *testing.T) {
 }
 
 func TestResolveHelperSourcePathDoesNotTrustCheckoutBin(t *testing.T) {
-	originalDir, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(originalDir) })
 	checkout := t.TempDir()
 	binDir := filepath.Join(checkout, "bin")
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
@@ -1500,9 +1495,7 @@ func TestResolveHelperSourcePathDoesNotTrustCheckoutBin(t *testing.T) {
 	if err := os.WriteFile(checkoutHelper, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chdir(checkout); err != nil {
-		t.Fatal(err)
-	}
+	t.Chdir(checkout)
 	t.Setenv("PATH", t.TempDir())
 
 	cfg := core.BaseConfig()

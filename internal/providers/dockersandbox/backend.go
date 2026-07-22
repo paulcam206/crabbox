@@ -523,10 +523,14 @@ func dockerSandboxAgent(cfg Config) string {
 func dockerSandboxWorkdir(cfg Config, repoRoot string) (string, error) {
 	workdir := strings.TrimSpace(cfg.DockerSandbox.Workdir)
 	if workdir == "" {
-		workdir = repoRoot
-	}
-	if workdir == "" {
-		workdir = defaultWorkdir
+		// repoRoot is a host path, but the workdir names a location inside the
+		// Linux sandbox. Only adopt it when it is already POSIX-absolute, so a
+		// Windows host path falls back to the default guest workdir.
+		if strings.HasPrefix(repoRoot, "/") {
+			workdir = repoRoot
+		} else {
+			workdir = defaultWorkdir
+		}
 	}
 	clean := path.Clean(workdir)
 	if !strings.HasPrefix(clean, "/") {

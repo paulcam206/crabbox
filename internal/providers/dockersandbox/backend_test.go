@@ -10,7 +10,9 @@ import (
 	"math"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -219,7 +221,7 @@ func TestRunCreatesExecsAndRemovesEphemeralSandbox(t *testing.T) {
 	if !containsArg(create.Args, t.TempDir()) {
 		// The exact temp dir differs from the assertion temp dir; check any
 		// absolute path reached the final workspace argument instead.
-		if len(create.Args) == 0 || !strings.HasPrefix(create.Args[len(create.Args)-1], "/") {
+		if len(create.Args) == 0 || !filepath.IsAbs(create.Args[len(create.Args)-1]) {
 			t.Fatalf("create args=%v missing workspace path", create.Args)
 		}
 	}
@@ -227,7 +229,11 @@ func TestRunCreatesExecsAndRemovesEphemeralSandbox(t *testing.T) {
 	if execCall == nil {
 		t.Fatal("missing exec call")
 	}
-	if !containsArg(execCall.Args, "--workdir") || !containsArg(execCall.Args, repoRoot) {
+	wantWorkdir := repoRoot
+	if runtime.GOOS == "windows" {
+		wantWorkdir = defaultWorkdir
+	}
+	if !containsArg(execCall.Args, "--workdir") || !containsArg(execCall.Args, wantWorkdir) {
 		t.Fatalf("exec args=%v missing workdir", execCall.Args)
 	}
 	if !containsArg(execCall.Args, "echo") || !containsArg(execCall.Args, "ok") {
@@ -866,11 +872,11 @@ func TestCreateSandboxRemovesSandboxWhenClaimSetupFails(t *testing.T) {
 			name:          "slug allocation",
 			requestedSlug: "wanted",
 			setupState: func(t *testing.T) {
-				stateFile := filepathJoin(t.TempDir(), "state-file")
-				if err := os.WriteFile(stateFile, []byte("not a directory"), 0o600); err != nil {
-					t.Fatal(err)
+				previous := allocateClaimLeaseSlug
+				allocateClaimLeaseSlug = func(string, string) (string, error) {
+					return "", core.Exit(2, "read claims directory: access denied")
 				}
-				t.Setenv("XDG_STATE_HOME", stateFile)
+				t.Cleanup(func() { allocateClaimLeaseSlug = previous })
 			},
 			want: "read claims directory",
 		},
@@ -878,16 +884,11 @@ func TestCreateSandboxRemovesSandboxWhenClaimSetupFails(t *testing.T) {
 			name:          "claim persistence",
 			requestedSlug: "",
 			setupState: func(t *testing.T) {
-				stateDir := t.TempDir()
-				claimsDir := filepathJoin(stateDir, "crabbox", "claims")
-				if err := os.MkdirAll(claimsDir, 0o700); err != nil {
-					t.Fatal(err)
+				previous := claimLeaseForRepoProviderPond
+				claimLeaseForRepoProviderPond = func(string, string, string, string, string, time.Duration, bool) error {
+					return core.Exit(2, "write claim: access denied")
 				}
-				if err := os.Chmod(claimsDir, 0o500); err != nil {
-					t.Fatal(err)
-				}
-				t.Cleanup(func() { _ = os.Chmod(claimsDir, 0o700) })
-				t.Setenv("XDG_STATE_HOME", stateDir)
+				t.Cleanup(func() { claimLeaseForRepoProviderPond = previous })
 			},
 			want: "write claim",
 		},
@@ -895,16 +896,11 @@ func TestCreateSandboxRemovesSandboxWhenClaimSetupFails(t *testing.T) {
 			name:          "claim persistence cleanup failure",
 			requestedSlug: "",
 			setupState: func(t *testing.T) {
-				stateDir := t.TempDir()
-				claimsDir := filepathJoin(stateDir, "crabbox", "claims")
-				if err := os.MkdirAll(claimsDir, 0o700); err != nil {
-					t.Fatal(err)
+				previous := claimLeaseForRepoProviderPond
+				claimLeaseForRepoProviderPond = func(string, string, string, string, string, time.Duration, bool) error {
+					return core.Exit(2, "write claim: access denied")
 				}
-				if err := os.Chmod(claimsDir, 0o500); err != nil {
-					t.Fatal(err)
-				}
-				t.Cleanup(func() { _ = os.Chmod(claimsDir, 0o700) })
-				t.Setenv("XDG_STATE_HOME", stateDir)
+				t.Cleanup(func() { claimLeaseForRepoProviderPond = previous })
 			},
 			rmReply: scriptedReply{stderr: "rm failed", exitCode: 1},
 			want:    "write claim",
@@ -1035,12 +1031,14 @@ func TestStatusReadyMissingWaitAndTimeout(t *testing.T) {
 	timeoutRunner := newRunner(map[string]scriptedReply{
 		"ls": {stdout: `[{"name":"crabbox-my-app-status","status":"provisioning"}]`},
 	}, nil)
-	timeoutCtx, timeoutCancel := context.WithTimeout(context.Background(), time.Millisecond)
+	// Windows timers have ~15.6ms granularity, so the caller deadline must stay
+	// far enough above WaitTimeout for the wait loop's own timeout to win the race.
+	timeoutCtx, timeoutCancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer timeoutCancel()
 	_, err = newTestBackend(newTestConfig(), timeoutRunner, io.Discard, io.Discard).Status(timeoutCtx, StatusRequest{
 		ID:          "status",
 		Wait:        true,
-		WaitTimeout: time.Nanosecond,
+		WaitTimeout: 10 * time.Millisecond,
 	})
 	if err == nil || !strings.Contains(err.Error(), "timed out waiting") {
 		t.Fatalf("timeout status err=%v", err)

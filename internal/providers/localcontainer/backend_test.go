@@ -4488,7 +4488,12 @@ func TestRuntimeInfoSkipsDockerContextForPodman(t *testing.T) {
 
 func writeExecutable(t *testing.T, path string) {
 	t.Helper()
-	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+	contents := []byte("#!/bin/sh\nexit 0\n")
+	if runtime.GOOS == "windows" {
+		path += ".cmd"
+		contents = []byte("@echo off\r\nexit /b 0\r\n")
+	}
+	if err := os.WriteFile(path, contents, 0o755); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -4720,6 +4725,21 @@ func TestCreateContainerMountsDockerHostUnixSocket(t *testing.T) {
 	}
 }
 
+func TestLocalDockerSocketPathDecodesURL(t *testing.T) {
+	for _, test := range []struct {
+		host string
+		want string
+	}{
+		{host: "unix:///tmp/docker%20socket", want: "/tmp/docker socket"},
+		{host: "unix://C:/Users/test/docker%20socket", want: "C:/Users/test/docker socket"},
+	} {
+		got, ok := localDockerSocketPath(test.host)
+		if !ok || got != test.want {
+			t.Fatalf("host=%q path=%q ok=%t, want %q", test.host, got, ok, test.want)
+		}
+	}
+}
+
 func TestCreateContainerMountsPodmanSocketWithSecurityOpt(t *testing.T) {
 	socketDir := t.TempDir()
 	socketPath := filepath.Join(socketDir, "podman.sock")
@@ -4837,6 +4857,26 @@ func TestDockerSocketMountUsesDaemonSocketForWindowsPipe(t *testing.T) {
 	}
 	if path != "/var/run/docker.sock" {
 		t.Fatalf("path=%q, want daemon-visible socket", path)
+	}
+}
+
+func TestDockerSocketMountUsesDaemonSocketForWindowsSocketPath(t *testing.T) {
+	path, err := dockerSocketMountPathFromHostForGOOS(`C:\Users\alice\AppData\Local\docker.sock`, "windows")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if path != "/var/run/docker.sock" {
+		t.Fatalf("path=%q, want daemon-visible socket", path)
+	}
+}
+
+func TestLocalDockerSocketPathAcceptsWindowsUnixURL(t *testing.T) {
+	got, ok := localDockerSocketPath(`unix://C:\Users\alice\AppData\Local\docker.sock`)
+	if !ok {
+		t.Fatal("Windows unix socket URL was rejected")
+	}
+	if got != `C:\Users\alice\AppData\Local\docker.sock` {
+		t.Fatalf("path=%q", got)
 	}
 }
 
@@ -5362,6 +5402,9 @@ func TestBootstrapScriptSupportsDockerSocketCLI(t *testing.T) {
 }
 
 func TestInstallVerifiedAPTKeyringScript(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fixture executes POSIX provisioning commands on the host")
+	}
 	for _, tc := range []struct {
 		name              string
 		actualFingerprint string
@@ -6748,17 +6791,37 @@ func TestReleaseLeaseWithIDResolvesHostWorkRoot(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(leaseRoot, "repo"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	inspectJSON := `[{
-		"Id":"container1234567890",
-		"Name":"/crabbox-release",
-		"Config":{"Image":"ubuntu:24.04","Labels":{"crabbox":"true","provider":"local-container","lease":"cbx_release","slug":"release-root","state":"ready","server_type":"ubuntu:24.04","ssh_user":"runner","work_root":"` + hostRoot + `","docker_socket":"1"}},
-		"State":{"Status":"running","Running":true},
-		"NetworkSettings":{"Ports":{"2222/tcp":[{"HostIp":"127.0.0.1","HostPort":"49153"}]}}
-	}]`
+	inspectJSON, err := json.Marshal([]inspectContainer{{
+		ID:   "container1234567890",
+		Name: "/crabbox-release",
+		Config: inspectConfig{
+			Image: "ubuntu:24.04",
+			Labels: map[string]string{
+				"crabbox":       "true",
+				"provider":      "local-container",
+				"lease":         "cbx_release",
+				"slug":          "release-root",
+				"state":         "ready",
+				"server_type":   "ubuntu:24.04",
+				"ssh_user":      "runner",
+				"work_root":     hostRoot,
+				"docker_socket": "1",
+			},
+		},
+		State: inspectState{Status: "running", Running: true},
+		NetworkSettings: inspectNetworking{
+			Ports: map[string][]inspectPort{
+				"2222/tcp": {{HostIP: "127.0.0.1", HostPort: "49153"}},
+			},
+		},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	runner := &recordingRunner{
 		responses: map[string]core.LocalCommandResult{
 			commandKey([]string{"ps", "-a", "--filter", "label=crabbox=true", "--filter", "label=provider=local-container", "--format", "{{.ID}}"}): {Stdout: "container1234567890\n"},
-			commandKey([]string{"inspect", "container1234567890"}):  {Stdout: inspectJSON},
+			commandKey([]string{"inspect", "container1234567890"}):  {Stdout: string(inspectJSON)},
 			commandKey([]string{"rm", "-f", "container1234567890"}): {},
 		},
 	}
@@ -7100,17 +7163,39 @@ func TestCleanupRemovesExpiredLocalContainers(t *testing.T) {
 		t.Fatal(err)
 	}
 	created := time.Now().Add(-48 * time.Hour).Unix()
-	inspectJSON := `[{
-		"Id":"abcdef1234567890",
-		"Name":"/crabbox-cleanup",
-		"Config":{"Image":"ubuntu:24.04","Labels":{"crabbox":"true","provider":"local-container","lease":"cbx_cleanup","slug":"old-cleanup","state":"ready","server_type":"ubuntu:24.04","ssh_user":"runner","work_root":"` + hostRoot + `","docker_socket":"1","bootstrap_dir":` + strconv.Quote(bootstrapDir) + `,"expires_at":"` + strconv.FormatInt(created, 10) + `"}},
-		"State":{"Status":"running","Running":true},
-		"NetworkSettings":{"Ports":{"2222/tcp":[{"HostIp":"127.0.0.1","HostPort":"49153"}]}}
-	}]`
+	inspectJSON, err := json.Marshal([]inspectContainer{{
+		ID:   "abcdef1234567890",
+		Name: "/crabbox-cleanup",
+		Config: inspectConfig{
+			Image: "ubuntu:24.04",
+			Labels: map[string]string{
+				"crabbox":       "true",
+				"provider":      "local-container",
+				"lease":         "cbx_cleanup",
+				"slug":          "old-cleanup",
+				"state":         "ready",
+				"server_type":   "ubuntu:24.04",
+				"ssh_user":      "runner",
+				"work_root":     hostRoot,
+				"docker_socket": "1",
+				"bootstrap_dir": bootstrapDir,
+				"expires_at":    strconv.FormatInt(created, 10),
+			},
+		},
+		State: inspectState{Status: "running", Running: true},
+		NetworkSettings: inspectNetworking{
+			Ports: map[string][]inspectPort{
+				"2222/tcp": {{HostIP: "127.0.0.1", HostPort: "49153"}},
+			},
+		},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	runner := &recordingRunner{
 		responses: map[string]core.LocalCommandResult{
 			commandKey([]string{"ps", "-a", "--filter", "label=crabbox=true", "--filter", "label=provider=local-container", "--format", "{{.ID}}"}): {Stdout: "abcdef1234567890\n"},
-			commandKey([]string{"inspect", "abcdef1234567890"}):  {Stdout: inspectJSON},
+			commandKey([]string{"inspect", "abcdef1234567890"}):  {Stdout: string(inspectJSON)},
 			commandKey([]string{"rm", "-f", "abcdef1234567890"}): {},
 		},
 	}
@@ -7177,17 +7262,38 @@ func TestCleanupSkipsIncompleteClaimBeforeHostWorkRootMutation(t *testing.T) {
 		t.Skip("filesystem permissions do not block RemoveAll for this user")
 	}
 	created := time.Now().Add(-48 * time.Hour).Unix()
-	inspectJSON := `[{
-		"Id":"abcdef1234567890",
-		"Name":"/crabbox-cleanup",
-		"Config":{"Image":"ubuntu:24.04","Labels":{"crabbox":"true","provider":"local-container","lease":"cbx_cleanup","slug":"old-cleanup","state":"ready","server_type":"ubuntu:24.04","ssh_user":"runner","work_root":"` + hostRoot + `","docker_socket":"1","expires_at":"` + strconv.FormatInt(created, 10) + `"}},
-		"State":{"Status":"running","Running":true},
-		"NetworkSettings":{"Ports":{"2222/tcp":[{"HostIp":"127.0.0.1","HostPort":"49153"}]}}
-	}]`
+	inspectJSON, err := json.Marshal([]inspectContainer{{
+		ID:   "abcdef1234567890",
+		Name: "/crabbox-cleanup",
+		Config: inspectConfig{
+			Image: "ubuntu:24.04",
+			Labels: map[string]string{
+				"crabbox":       "true",
+				"provider":      "local-container",
+				"lease":         "cbx_cleanup",
+				"slug":          "old-cleanup",
+				"state":         "ready",
+				"server_type":   "ubuntu:24.04",
+				"ssh_user":      "runner",
+				"work_root":     hostRoot,
+				"docker_socket": "1",
+				"expires_at":    strconv.FormatInt(created, 10),
+			},
+		},
+		State: inspectState{Status: "running", Running: true},
+		NetworkSettings: inspectNetworking{
+			Ports: map[string][]inspectPort{
+				"2222/tcp": []inspectPort{{HostIP: "127.0.0.1", HostPort: "49153"}},
+			},
+		},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	runner := &recordingRunner{
 		responses: map[string]core.LocalCommandResult{
 			commandKey([]string{"ps", "-a", "--filter", "label=crabbox=true", "--filter", "label=provider=local-container", "--format", "{{.ID}}"}): {Stdout: "abcdef1234567890\n"},
-			commandKey([]string{"inspect", "abcdef1234567890"}):  {Stdout: inspectJSON},
+			commandKey([]string{"inspect", "abcdef1234567890"}):  {Stdout: string(inspectJSON)},
 			commandKey([]string{"rm", "-f", "abcdef1234567890"}): {},
 		},
 	}
