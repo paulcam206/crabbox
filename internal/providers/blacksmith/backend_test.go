@@ -1195,7 +1195,7 @@ func TestBlacksmithKeepOnFailureKeepsTestboxAndWritesBundle(t *testing.T) {
 	}
 	bundle := ""
 	for _, field := range strings.Fields(got) {
-		if strings.HasPrefix(field, "local=.crabbox/captures/") {
+		if strings.HasPrefix(field, "local="+filepath.Join(".crabbox", "captures")+string(filepath.Separator)) {
 			bundle = strings.TrimPrefix(field, "local=")
 			break
 		}

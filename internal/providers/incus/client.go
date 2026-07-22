@@ -536,7 +536,10 @@ func writeOIDCTokens(path string, tokens *oidc.Tokens[*oidc.IDTokenClaims]) erro
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmpPath, path)
+	if err := os.Rename(tmpPath, path); err != nil {
+		return err
+	}
+	return core.SecurePrivatePath(path, false)
 }
 
 func lockOIDCTokens(path string) (*flock.Flock, error) {

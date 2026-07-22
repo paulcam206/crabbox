@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
@@ -609,6 +610,9 @@ func writePrivateFileAtomic(path string, data []byte) error {
 		return err
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
+		return err
+	}
+	if err := core.SecurePrivatePath(path, false); err != nil {
 		return err
 	}
 	keep = true
