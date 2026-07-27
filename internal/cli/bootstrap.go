@@ -371,23 +371,23 @@ func windowsWSLWorkRoot(cfg Config) string {
 
 func windowsManagedCorePreludePowerShell(cfg Config) string {
 	if cfg.WindowsMode == windowsModeNormal && cfg.Desktop {
-		return `
+		return fmt.Sprintf(`
 	$vncPasswordPath = "C:\ProgramData\crabbox\vnc.password"
 	$windowsUsernamePath = "C:\ProgramData\crabbox\windows.username"
-	$windowsPasswordPath = "C:\ProgramData\crabbox\windows.password"
+	$windowsPasswordPath = %s
 	$passwordPath = $vncPasswordPath
 	$usernamePath = $windowsUsernamePath
 	$passwordMirrorPath = $windowsPasswordPath
 	$tightVNCInstaller = "$env:TEMP\tightvnc-2.8.85-gpl-setup-64bit.msi"
-	`
+	`, psQuote(WindowsActionsRunnerCredentialPath))
 	}
-	return `
+	return fmt.Sprintf(`
 	$windowsUsernamePath = "C:\ProgramData\crabbox\windows.username"
-	$windowsPasswordPath = "C:\ProgramData\crabbox\windows.password"
+	$windowsPasswordPath = %s
 	$passwordPath = $windowsPasswordPath
 	$usernamePath = $windowsUsernamePath
 	$passwordMirrorPath = $null
-	`
+	`, psQuote(WindowsActionsRunnerCredentialPath))
 }
 
 func windowsWSL2BootstrapPowerShell(cfg Config) string {
@@ -656,11 +656,11 @@ func azureWindowsBootstrapPowerShell(cfg Config, publicKey string) string {
 	if cfg.Desktop {
 		setupComplete = ""
 	}
-	return windowsBootstrapHeaderPowerShell(cfg, publicKey, workRoot) + `
-$passwordPath = Join-Path $base "windows.password"
+	return windowsBootstrapHeaderPowerShell(cfg, publicKey, workRoot) + fmt.Sprintf(`
+$passwordPath = %s
 $usernamePath = Join-Path $base "windows.username"
 $passwordMirrorPath = $null
-` + windowsBootstrapCorePowerShell() + `
+`, psQuote(WindowsActionsRunnerCredentialPath)) + windowsBootstrapCorePowerShell() + `
 git --version | Out-Null
 tar --version | Out-Null
 ` + setupComplete + `

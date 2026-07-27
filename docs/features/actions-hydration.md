@@ -27,6 +27,17 @@ There are two hydration paths:
 Both paths converge on the same readiness marker, so later `crabbox run`
 commands attach to the hydrated workspace identically.
 
+On native Windows, GitHub-runner hydration launches the ephemeral runner as the
+selected guest user through a Scheduled Task so it survives the OpenSSH
+registration session closing. Managed AWS/Azure bootstrap and fresh Hyper-V
+Windows acquisition provide
+`C:\ProgramData\crabbox\windows.password`; Crabbox reads its exact UTF-8 bytes
+without trimming. Hyper-V protects the file with a non-inherited ACL limited to
+the selected user, Builtin Administrators, and LocalSystem. The credential is
+not stored in Crabbox claims or logs. Older retained Hyper-V Windows leases do
+not receive this escrow during resolve or hydration and must be released and
+recreated before `--github-runner` hydration.
+
 ## Supported targets
 
 | Path | Targets |
