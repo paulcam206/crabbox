@@ -177,6 +177,14 @@ Job containers and service containers are not; `actions/checkout` options that
 change the repository, path, submodules, or LFS fail locally so you can rerun
 with `--github-runner` when you need full GitHub Actions semantics.
 
+For native Windows, the GitHub runner is started as the selected guest user by a
+Scheduled Task, not as LocalSystem, so it remains online after the SSH
+registration command returns. Fresh Hyper-V Windows acquisition creates the
+protected credential escrow used to register that task. The exact UTF-8
+password is not trimmed and is not persisted in Crabbox claims or logs. Existing
+retained Hyper-V Windows leases are intentionally not backfilled during
+`actions hydrate`; release and recreate them before using `--github-runner`.
+
 Local hydration resolves simple expressions in env, run steps, working
 directories, and supported action inputs: `${{ inputs.name }}`,
 `${{ env.NAME }}`, `${{ github.workspace }}`, `${{ hashFiles(...) }}`, and

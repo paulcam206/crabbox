@@ -302,15 +302,25 @@ During Windows `Acquire`, the provider:
 2. With `--hyperv-init-password`, mounts the lease disk offline and writes a
    first-boot `RunOnce` that sets the guest password (password-less templates)
 3. Creates and starts the VM with its network adapter disconnected
-4. Waits for PowerShell Direct readiness within a bounded boot timeout
-5. Uses PowerShell Direct to stop/disable sshd, add an inbound TCP/22 block
+4. Waits for a trivial authenticated PowerShell Direct call to succeed. The
+   readiness loop has an overall boot budget and bounds each attempt so a guest
+   that is still booting cannot hang acquisition.
+5. Escrows the exact guest password at
+   `C:\ProgramData\crabbox\windows.password` for durable GitHub Actions runner
+   startup. The password reaches the host PowerShell process only through
+   `_CRABBOX_GP` and reaches the guest only through the remoting argument list.
+   Crabbox writes UTF-8 without a BOM or newline to an empty temporary file
+   after applying a fresh protected ACL containing only the selected local user,
+   Builtin Administrators, and LocalSystem, then atomically replaces the target.
+   The password is never added to lease claims, labels, or logs.
+6. Uses PowerShell Direct to stop/disable sshd, add an inbound TCP/22 block
    rule, replace authorized keys, discard template `Match` authentication
    blocks, and restrict SSH to the selected user
-6. Connects the network adapter, installs the pinned Win32-OpenSSH MSI from
+7. Connects the network adapter, installs the pinned Win32-OpenSSH MSI from
    GitHub if `sshd` is absent, and keeps sshd stopped behind the quarantine rule
-7. Reapplies the final key-only config, validates `sshd_config`, regenerates
+8. Reapplies the final key-only config, validates `sshd_config`, regenerates
    per-lease SSH host keys, starts sshd, and removes the quarantine rule last
-8. Installs git (MinGit) if absent — required for Crabbox sync
+9. Installs git (MinGit) if absent — required for Crabbox sync
 9. With `--desktop`, installs/configures loopback-only TightVNC, handles its
    expected one-time reboot through bounded PowerShell Direct retries, and
    reruns the marked setup idempotently
@@ -458,7 +468,9 @@ installation.
 
 1. **Acquire**: Creates a per-lease differencing root disk and Generation 2 VM,
    applies target-aware secure boot, then follows the Linux cloud-init or
-   Windows PowerShell Direct bootstrap described above.
+   Windows PowerShell Direct bootstrap described above. Credential escrow
+   failure aborts acquisition and follows the normal `keep=true` preserve or
+   default VM/differencing-disk cleanup policy.
 2. **Resolve**: Finds a VM by lease ID, slug, or instance name and reports live
    Hyper-V state. Reuse requires a live VM and an exact local claim; a recovered
    legacy VM must be adopted with explicit `--reclaim`.
@@ -481,6 +493,10 @@ installation.
 - The selected SSH account must be a local account name containing only letters,
   digits, `.`, `_`, or `-`. Domain/UPN names and SSH pattern characters are
   rejected so `AllowUsers` cannot broaden access.
+- Durable native-Windows GitHub Actions runner startup depends on the protected
+  credential escrow created during a fresh acquisition. Retained Windows leases
+  acquired by older Crabbox builds are not backfilled during resolve or
+  hydration; release and recreate them before using `--github-runner`.
 - VHD files are stored in `%USERPROFILE%\Hyper-V\Virtual Hard Disks\` by
   default. Only deterministically named provider-owned root, checkpoint, and
   seed disks are cleaned up; unrelated attached disks are preserved.

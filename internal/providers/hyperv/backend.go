@@ -259,13 +259,7 @@ func (b *backend) acquireWindows(ctx context.Context, req AcquireRequest) (Lease
 		return nil
 	}
 
-	if err := b.waitGuestReady(ctx, name, cfg.HyperV.User); err != nil {
-		return LeaseTarget{}, errors.Join(fmt.Errorf("guest did not become reachable over PowerShell Direct: %w", err), cleanupFailedLease())
-	}
-	if err := b.stageSSHKey(ctx, name, cfg.HyperV.User, publicKey); err != nil {
-		return LeaseTarget{}, errors.Join(fmt.Errorf("pre-network SSH lockdown failed: %w", err), cleanupFailedLease())
-	}
-	if err := b.connectVMNetwork(ctx, name, cfg.HyperV.Switch); err != nil {
+	if err := b.prepareWindowsGuestNetwork(ctx, cfg, name, publicKey); err != nil {
 		return LeaseTarget{}, errors.Join(err, cleanupFailedLease())
 	}
 
@@ -312,6 +306,19 @@ func (b *backend) acquireWindows(ctx context.Context, req AcquireRequest) (Lease
 	cleanupKey = false
 	fmt.Fprintf(b.rt.Stderr, "provisioned lease=%s instance=%s state=ready\n", leaseID, name)
 	return lease, nil
+}
+
+func (b *backend) prepareWindowsGuestNetwork(ctx context.Context, cfg Config, vmName, publicKey string) error {
+	if err := b.waitGuestReady(ctx, vmName, cfg.HyperV.User); err != nil {
+		return fmt.Errorf("guest did not become reachable over PowerShell Direct: %w", err)
+	}
+	if err := b.persistWindowsActionsRunnerCredential(ctx, vmName, cfg.HyperV.User); err != nil {
+		return fmt.Errorf("guest Actions runner credential persistence failed: %w", err)
+	}
+	if err := b.stageSSHKey(ctx, vmName, cfg.HyperV.User, publicKey); err != nil {
+		return fmt.Errorf("pre-network SSH lockdown failed: %w", err)
+	}
+	return b.connectVMNetwork(ctx, vmName, cfg.HyperV.Switch)
 }
 
 // persistLease records ownership before VM creation, then atomically updates
