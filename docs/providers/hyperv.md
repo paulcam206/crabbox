@@ -82,7 +82,10 @@ Windows, queries the Hyper-V optional feature, inventories VMs, and reports the
 configured image path. It does not validate that the image exists or boots,
 that Windows credentials work, or that Linux KVP/VSS and optional browser
 requirements are satisfied. `--probe-ssh` reports that a running lease is
-required rather than creating one.
+required rather than creating one. Its Hyper-V optional-feature query calls
+`Get-WindowsOptionalFeature`, which requires elevation even when provisioning
+does not, so an unelevated `Hyper-V Administrators` shell reports that one check
+as failed while acquire, proof, and release still work.
 
 OpenSSH and git do **not** need to be pre-installed. On first acquire the
 provider installs the pinned, SHA-256-verified Win32-OpenSSH MSI used by the
