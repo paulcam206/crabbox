@@ -240,6 +240,55 @@ icacls.exe $vncPasswordPath /inheritance:r /grant "*${userSID}:F" /grant "*S-1-5
 ` + windowsDesktopBootstrapPowerShell()
 }
 
+func managedWindowsDesktopTerminalBootstrapPowerShell() string {
+	return `$ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+$gitInstaller = Join-Path $env:TEMP "crabbox-git-for-windows.exe"
+$git = "C:\Program Files\Git\cmd\git.exe"
+$mintty = "C:\Program Files\Git\usr\bin\mintty.exe"
+function Invoke-CrabboxDesktopDownload {
+  for ($attempt = 1; $attempt -le 8; $attempt++) {
+    try {
+      Invoke-WebRequest -Uri ` + psQuote(gitForWindowsSetupURL) + ` -OutFile $gitInstaller -UseBasicParsing
+      return
+    } catch {
+      if ($attempt -eq 8) { throw }
+      Start-Sleep -Seconds ($attempt * 5)
+    }
+  }
+}
+if (-not (Test-Path -LiteralPath $git) -or -not (Test-Path -LiteralPath $mintty)) {
+  Invoke-CrabboxDesktopDownload
+  $actual = (Get-FileHash -LiteralPath $gitInstaller -Algorithm SHA256).Hash.ToLowerInvariant()
+  if ($actual -ne ` + psQuote(gitForWindowsSetupSHA256) + `) {
+    Remove-Item -Force -LiteralPath $gitInstaller -ErrorAction SilentlyContinue
+    throw "Git for Windows SHA-256 mismatch"
+  }
+  try {
+    $process = Start-Process -FilePath $gitInstaller -ArgumentList "/VERYSILENT","/NORESTART","/NOCANCEL","/SP-" -PassThru -Wait
+    if ($process.ExitCode -ne 0 -and $process.ExitCode -ne 3010) {
+      throw "Git for Windows install failed with exit $($process.ExitCode)"
+    }
+  } finally {
+    Remove-Item -Force -LiteralPath $gitInstaller -ErrorAction SilentlyContinue
+  }
+}
+if (-not (Test-Path -LiteralPath $git) -or -not (Test-Path -LiteralPath $mintty)) {
+  throw "Git for Windows desktop terminal is unavailable after install"
+}
+$machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+foreach ($path in @("C:\Program Files\Git\cmd", "C:\Program Files\Git\usr\bin")) {
+  if ($machinePath -notlike "*$path*") { $machinePath = "$machinePath;$path" }
+  if ($env:Path -notlike "*$path*") { $env:Path = "$env:Path;$path" }
+}
+[Environment]::SetEnvironmentVariable("Path", $machinePath, "Machine")
+Restart-Service sshd -Force
+Write-Output "GIT=$git"
+Write-Output "MINTTY=$mintty"
+`
+}
+
 func windowsBootstrapCorePowerShell() string {
 	return `
 if (-not (Test-Path -LiteralPath $passwordPath)) {

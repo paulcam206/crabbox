@@ -780,6 +780,9 @@ func TestWindowsDesktopLaunchRemoteCommandUsesActiveInteractiveSession(t *testin
 		"CrabboxDesktopWindows",
 		"RelatedTo",
 		"AddSeconds(45)",
+		"@($script, $result, $env:USERNAME)",
+		"WTSQuerySessionInformation",
+		"ActiveSessionId(user)",
 		"SetForegroundWindow",
 		"GetForegroundWindow",
 		windowsDesktopWindowMarker,
@@ -857,6 +860,7 @@ func TestWindowsDesktopTerminalUsesMinttyWithSixelDefaults(t *testing.T) {
 		"Columns=84",
 		"Rows=26",
 		"Scrollbar=none",
+		"-h always",
 		"TERM=xterm-256color",
 		"GIFGREP_INLINE",
 		"'/c/gifgrep-smoke/run.sh'",
@@ -1043,10 +1047,13 @@ func TestDesktopVideoRemoteCommandRejectsWayland(t *testing.T) {
 
 func TestDesktopRecorderDiagnosticsCommandsCoverWindowsAndLinux(t *testing.T) {
 	win := desktopRecorderDiagnosticsRemoteCommand(SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal})
-	for _, want := range []string{"powershell.exe", "-EncodedCommand"} {
+	for _, want := range []string{`Write-Output "- target-os: windows"`, "windows-password-file", "query user", "mintty: pid="} {
 		if !strings.Contains(win, want) {
 			t.Fatalf("windows diagnostics missing %q:\n%s", want, win)
 		}
+	}
+	if strings.Contains(win, "-EncodedCommand") {
+		t.Fatalf("windows diagnostics must be an exact script payload, not a nested encoded command:\n%s", win)
 	}
 	linux := desktopRecorderDiagnosticsRemoteCommand(SSHTarget{TargetOS: targetLinux})
 	for _, want := range []string{"remote-ffmpeg", "xdpyinfo", "vnc-listener"} {

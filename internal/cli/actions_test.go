@@ -277,8 +277,8 @@ func TestGitHubActionsRunnerInstallPowerShellScriptUsesOfficialWindowsRunner(t *
 		"New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero)",
 		"-Settings $settings",
 		WindowsActionsRunnerCredentialPath,
-		"[IO.File]::ReadAllBytes($passwordPath)",
-		"System.Text.UTF8Encoding($false, $true)",
+		"[IO.File]::ReadAllBytes($logonPath)",
+		"[Text.UTF8Encoding]::new($false, $true)",
 		"Windows runner credential file is empty",
 		"Start-Process",
 		"run-crabbox.ps1",
@@ -294,7 +294,7 @@ func TestGitHubActionsRunnerInstallPowerShellScriptUsesOfficialWindowsRunner(t *
 		t.Fatalf("Windows runner installer must verify checksum before replacing/extracting: checksum=%d clear=%d extract=%d", checksum, clearRunner, extract)
 	}
 	for _, forbidden := range []string{
-		"Get-Content -Raw -LiteralPath $passwordPath",
+		"Get-Content -Raw -LiteralPath $logonPath",
 		").Trim()",
 	} {
 		if strings.Contains(got, forbidden) {

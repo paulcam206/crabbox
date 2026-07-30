@@ -666,6 +666,8 @@ func TestAzureWindowsSnapshotRehydrateRotatesServiceVNCCredentials(t *testing.T)
 		"-Name ControlPassword -PropertyType Binary",
 		"Stop-Service -Name tvnserver",
 		"Start-Service -Name tvnserver",
+		"WTSQuerySessionInformation",
+		"no active interactive Windows session for requested user",
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("snapshot rehydrate script missing %q", want)

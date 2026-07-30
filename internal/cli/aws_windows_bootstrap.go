@@ -156,6 +156,10 @@ func ManagedWindowsDesktopBootstrapPowerShell(user string) string {
 	return managedWindowsDesktopBootstrapPowerShell(user)
 }
 
+func ManagedWindowsDesktopTerminalBootstrapPowerShell() string {
+	return managedWindowsDesktopTerminalBootstrapPowerShell()
+}
+
 func bootstrapManagedWindowsWSL2(ctx context.Context, cfg Config, target *SSHTarget, bootstrapTarget SSHTarget, publicKey string, stderr io.Writer) error {
 	for attempt := 1; attempt <= 5; attempt++ {
 		if err := waitForSSHReady(ctx, &bootstrapTarget, stderr, "windows openssh", 20*time.Minute); err != nil {

@@ -23,23 +23,29 @@ type backend struct {
 	cfg  Config
 	rt   Runtime
 
-	// PowerShell Direct can block instead of failing while a guest boots, so
-	// readiness probes and later guest calls need per-attempt timeouts.
-	// Overridden by tests.
-	guestReadyProbeTimeout time.Duration
-	guestReadyBudget       time.Duration
-	guestInvokeTimeout     time.Duration
-	guestRetryBackoff      time.Duration
-	sshReady               func(context.Context, *SSHTarget, io.Writer, string, time.Duration) error
-	resumeSSHProbeTimeout  time.Duration
-	resumeIPStableWindow   time.Duration
-	resumePollInterval     time.Duration
-	waitWindowsVNC         func(context.Context, *SSHTarget, io.Writer, time.Duration) error
-	ensureLeaseKey         func(Config, string) (string, string, error)
-	logoutTailscale        func(context.Context, core.SSHTarget) (string, error)
-	bootstrapTailscale     func(context.Context, Config, core.SSHTarget) (string, error)
-	runSSHOutput           func(context.Context, SSHTarget, string) (string, error)
-	cacheRoot              string
+	// Guest boot/readiness timing. crabbox waits for PowerShell Direct itself to
+	// answer a trivial authenticated probe before the first real guest call,
+	// because PS Direct blocks (rather than fast-failing) while the guest is
+	// still booting. Each attempt is bounded by guestReadyProbeTimeout so a
+	// blocked probe is killed and retried (proven not to corrupt the guest
+	// session), and guestInvokeTimeout bounds each real guest call so a wedged
+	// mid-session call cannot hang the provision forever. Overridable in tests.
+	guestReadyProbeTimeout    time.Duration
+	guestReadyBudget          time.Duration
+	guestInvokeTimeout        time.Duration
+	guestRetryBackoff         time.Duration
+	sshReady                  func(context.Context, *SSHTarget, io.Writer, string, time.Duration) error
+	resumeSSHProbeTimeout     time.Duration
+	resumeIPStableWindow      time.Duration
+	resumePollInterval        time.Duration
+	waitWindowsVNC            func(context.Context, *SSHTarget, io.Writer, time.Duration) error
+	waitWindowsDesktopSession func(context.Context, string, string, time.Duration) error
+	waitWindowsSSHStable      func(context.Context, *SSHTarget, io.Writer, time.Duration) error
+	ensureLeaseKey            func(Config, string) (string, string, error)
+	logoutTailscale           func(context.Context, core.SSHTarget) (string, error)
+	bootstrapTailscale        func(context.Context, Config, core.SSHTarget) (string, error)
+	runSSHOutput              func(context.Context, SSHTarget, string) (string, error)
+	cacheRoot                 string
 }
 
 var hypervHostOS = runtime.GOOS
@@ -60,7 +66,7 @@ type hypervNetAdapter struct {
 
 func newBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
 	applyDefaults(&cfg)
-	return &backend{
+	b := &backend{
 		spec:                   spec,
 		cfg:                    cfg,
 		rt:                     rt,
@@ -79,6 +85,9 @@ func newBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
 		runSSHOutput:           core.RunSSHOutput,
 		cacheRoot:              hypervCacheRoot(),
 	}
+	b.waitWindowsDesktopSession = b.waitForWindowsDesktopSession
+	b.waitWindowsSSHStable = b.waitForWindowsSSHStable
+	return b
 }
 
 func applyDefaults(cfg *Config) {
@@ -277,13 +286,15 @@ func (b *backend) acquireWindows(ctx context.Context, req AcquireRequest) (Lease
 			return LeaseTarget{}, errors.Join(fmt.Errorf("post-boot SSH key injection failed: %w", retryErr), cleanupFailedLease())
 		}
 	}
-	if err := b.ensureGit(ctx, name, cfg.HyperV.User); err != nil {
-		return LeaseTarget{}, errors.Join(fmt.Errorf("guest git setup failed: %w", err), cleanupFailedLease())
-	}
 	if cfg.Desktop {
+		if err := b.ensureWindowsDesktopTerminal(ctx, name, cfg.HyperV.User); err != nil {
+			return LeaseTarget{}, errors.Join(fmt.Errorf("guest desktop terminal setup failed: %w", err), cleanupFailedLease())
+		}
 		if err := b.bootstrapWindowsDesktop(ctx, name, cfg.HyperV.User); err != nil {
 			return LeaseTarget{}, errors.Join(err, cleanupFailedLease())
 		}
+	} else if err := b.ensureGit(ctx, name, cfg.HyperV.User); err != nil {
+		return LeaseTarget{}, errors.Join(fmt.Errorf("guest git setup failed: %w", err), cleanupFailedLease())
 	}
 	lease, err := b.prepareLease(ctx, cfg, hypervVM{Name: name, State: 2}, ip, claim, true)
 	if err != nil {

@@ -505,14 +505,26 @@ func (a App) desktopProof(ctx context.Context, args []string) error {
 		return err
 	}
 	rescueCtx := rescueContext{Cfg: cfg, Target: target, LeaseID: leaseID}
-	if out, err := runDesktopLaunchRemoteCombinedOutput(ctx, target, desktopLaunchRemoteCommand(target, workdir, env, terminalCommand, desktopLaunchOptions{
+	launchOutput, err := runDesktopLaunchRemoteCombinedOutput(ctx, target, desktopLaunchRemoteCommand(target, workdir, env, terminalCommand, desktopLaunchOptions{
 		VerifyProcess:      true,
 		VisibleWindowTitle: terminalTitle,
-	})); err != nil {
-		printRescue(a.Stdout, classifyDesktopFailure(out), trimFailureDetail(out), desktopDoctorCommand(rescueCtx), desktopLaunchRetryCommand(rescueCtx, terminalCommand))
+	}))
+	if err != nil {
+		printRescue(a.Stdout, classifyDesktopFailure(launchOutput), trimFailureDetail(launchOutput), desktopDoctorCommand(rescueCtx), desktopLaunchRetryCommand(rescueCtx, terminalCommand))
 		return exit(5, "launch desktop proof terminal: %v", err)
 	}
+	var terminalWindow windowsDesktopWindow
+	if isWindowsNativeTarget(target) {
+		terminalWindow, err = parseWindowsDesktopWindow(launchOutput)
+		if err != nil {
+			printRescue(a.Stdout, rescueDesktopCommandNotLaunched, trimFailureDetail(launchOutput), desktopDoctorCommand(rescueCtx), desktopLaunchRetryCommand(rescueCtx, terminalCommand))
+			return exit(5, "launch desktop proof terminal: %v", err)
+		}
+	}
 	fmt.Fprintf(a.Stdout, "launched terminal: %s\n", strings.Join(terminalCommand, " "))
+	if terminalWindow.PID != 0 {
+		fmt.Fprintf(a.Stdout, "terminal window: pid=%d session=%d title=%q\n", terminalWindow.PID, terminalWindow.SessionID, terminalWindow.Title)
+	}
 	if *waitVisible > 0 {
 		timer := time.NewTimer(*waitVisible)
 		select {
@@ -524,19 +536,22 @@ func (a App) desktopProof(ctx context.Context, args []string) error {
 	}
 	metadataPath := filepath.Join(dir, "metadata.json")
 	if err := writeProofMetadata(metadataPath, desktopProofMetadata{
-		CreatedAt:      time.Now().UTC().Format(time.RFC3339),
-		Version:        currentVersion(),
-		LeaseID:        leaseID,
-		Slug:           serverSlug(server),
-		Provider:       cfg.Provider,
-		Network:        string(cfg.Network),
-		TargetOS:       target.TargetOS,
-		Command:        command,
-		TerminalCols:   *cols,
-		TerminalRows:   *rows,
-		TerminalSixel:  *sixel,
-		RecordDuration: recordDuration.String(),
-		RecordFPS:      *recordFPS,
+		CreatedAt:         time.Now().UTC().Format(time.RFC3339),
+		Version:           currentVersion(),
+		LeaseID:           leaseID,
+		Slug:              serverSlug(server),
+		Provider:          cfg.Provider,
+		Network:           string(cfg.Network),
+		TargetOS:          target.TargetOS,
+		Command:           command,
+		TerminalCols:      *cols,
+		TerminalRows:      *rows,
+		TerminalSixel:     *sixel,
+		TerminalPID:       terminalWindow.PID,
+		TerminalSessionID: terminalWindow.SessionID,
+		TerminalTitle:     terminalWindow.Title,
+		RecordDuration:    recordDuration.String(),
+		RecordFPS:         *recordFPS,
 	}); err != nil {
 		return err
 	}
@@ -650,6 +665,7 @@ func desktopTerminalCommand(target SSHTarget, command []string, opts desktopTerm
 			"-o", fmt.Sprintf("Columns=%d", opts.Cols),
 			"-o", fmt.Sprintf("Rows=%d", opts.Rows),
 			"-o", "Scrollbar=none",
+			"-h", "always",
 			"/usr/bin/bash", "-lc", shellCommand,
 		}, nil
 	}
@@ -1043,7 +1059,7 @@ if ($null -eq $service) {
 }
 try {
   New-Item -ItemType Directory -Force -Path $requestDirectory | Out-Null
-  Set-Content -Encoding UTF8 -LiteralPath $requestTemp -Value @($script, $result)
+  Set-Content -Encoding UTF8 -LiteralPath $requestTemp -Value @($script, $result, $env:USERNAME)
   Move-Item -Force -LiteralPath $requestTemp -Destination $request
   if ($service.Status -ne "Running") { Start-Service -Name $serviceName }
   $deadline = [DateTime]::UtcNow.AddSeconds(45)

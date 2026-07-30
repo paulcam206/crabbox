@@ -648,6 +648,9 @@ func TestAWSUserDataWindowsProfile(t *testing.T) {
 		"Set-Service -StartupType Automatic",
 		"Start-Service -Name tvnserver",
 		"CrabboxDesktopLauncher",
+		"WTSQuerySessionInformation",
+		"SessionUserName",
+		"no active interactive Windows session for requested user",
 		"WTSQueryUserToken",
 		"CreateProcessAsUserW",
 		`startup.lpDesktop = @"winsta0\default"`,
@@ -693,6 +696,25 @@ func TestAWSUserDataWindowsProfile(t *testing.T) {
 	aclIndex := strings.Index(got, "foreach ($credentialPath in $credentialPaths)")
 	if mirrorIndex < 0 || aclIndex < 0 || mirrorIndex > aclIndex {
 		t.Fatalf("windows password mirror must be included before credential ACL hardening")
+	}
+}
+
+func TestManagedWindowsDesktopTerminalBootstrapInstallsFullGit(t *testing.T) {
+	got := ManagedWindowsDesktopTerminalBootstrapPowerShell()
+	for _, want := range []string{
+		gitForWindowsSetupURL,
+		gitForWindowsSetupSHA256,
+		`C:\Program Files\Git\cmd\git.exe`,
+		`C:\Program Files\Git\usr\bin\mintty.exe`,
+		`"/VERYSILENT","/NORESTART","/NOCANCEL","/SP-"`,
+		"Restart-Service sshd -Force",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("desktop terminal bootstrap missing %q", want)
+		}
+	}
+	if strings.Contains(got, "MinGit") {
+		t.Fatal("desktop terminal bootstrap must install full Git for Windows, not MinGit")
 	}
 }
 
