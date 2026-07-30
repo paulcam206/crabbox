@@ -876,6 +876,42 @@ func TestWindowsDesktopTerminalUsesMinttyWithSixelDefaults(t *testing.T) {
 	}
 }
 
+func TestWindowsDesktopTerminalDisablesMsysArgumentConversion(t *testing.T) {
+	got, err := desktopTerminalCommand(
+		SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal},
+		[]string{"cmd.exe", "/d", "/c", "echo desktop-proof"},
+		desktopTerminalOptions{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shellCommand := got[len(got)-1]
+	if !strings.HasPrefix(shellCommand, "export MSYS2_ARG_CONV_EXCL='*' MSYS_NO_PATHCONV=1; ") {
+		t.Fatalf("windows terminal command must disable MSYS argument conversion before the command: %q", shellCommand)
+	}
+	if !strings.HasSuffix(shellCommand, `'cmd.exe' '/d' '/c' 'echo desktop-proof'`) {
+		t.Fatalf("windows terminal command must preserve the requested command: %q", shellCommand)
+	}
+}
+
+func TestWindowsDesktopTerminalDisablesMsysConversionForInteractiveShell(t *testing.T) {
+	got, err := desktopTerminalCommand(
+		SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal},
+		nil,
+		desktopTerminalOptions{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shellCommand := got[len(got)-1]
+	if !strings.Contains(shellCommand, "MSYS2_ARG_CONV_EXCL='*'") {
+		t.Fatalf("interactive windows terminal must disable MSYS argument conversion: %q", shellCommand)
+	}
+	if !strings.HasSuffix(shellCommand, "exec /usr/bin/bash -l") {
+		t.Fatalf("interactive windows terminal must still exec a login shell: %q", shellCommand)
+	}
+}
+
 func TestMacOSDesktopTerminalUsesGhostty(t *testing.T) {
 	got, err := desktopTerminalCommand(
 		SSHTarget{TargetOS: targetMacOS},

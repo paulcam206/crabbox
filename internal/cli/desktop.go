@@ -648,16 +648,18 @@ func desktopTerminalCommand(target SSHTarget, command []string, opts desktopTerm
 		if len(command) > 0 {
 			shellCommand = shellJoin(command)
 		}
+		// Git for Windows runs the terminal command through the MSYS runtime,
+		// which rewrites arguments that look like POSIX paths. Without this,
+		// `cmd.exe /d /c ...` loses its switches and opens an interactive shell
+		// instead of running the requested command.
+		prefix := "export MSYS2_ARG_CONV_EXCL='*' MSYS_NO_PATHCONV=1; "
 		if opts.Sixel {
-			prefix := "export TERM=xterm-256color GIFGREP_INLINE=${GIFGREP_INLINE:-sixel}; "
-			if shellCommand == "" {
-				shellCommand = prefix + "exec /usr/bin/bash -l"
-			} else {
-				shellCommand = prefix + shellCommand
-			}
-		} else if shellCommand == "" {
+			prefix += "export TERM=xterm-256color GIFGREP_INLINE=${GIFGREP_INLINE:-sixel}; "
+		}
+		if shellCommand == "" {
 			shellCommand = "exec /usr/bin/bash -l"
 		}
+		shellCommand = prefix + shellCommand
 		return []string{
 			`C:\Program Files\Git\usr\bin\mintty.exe`,
 			"-t", opts.Title,
@@ -1088,15 +1090,7 @@ func runDesktopLaunchRemoteCombinedOutput(ctx context.Context, target SSHTarget,
 		return runSSHCombinedOutput(ctx, target, remote)
 	}
 	var output bytes.Buffer
-	command := `powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$path=Join-Path $env:TEMP ('crabbox-desktop-launch-command-'+[Guid]::NewGuid().ToString('N')+'.ps1');$source=[Console]::In.ReadToEnd();[IO.File]::WriteAllText($path,$source,(New-Object Text.UTF8Encoding($false)));try{& powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $path;$code=$LASTEXITCODE}finally{Remove-Item -Force -LiteralPath $path -ErrorAction SilentlyContinue};if($null -eq $code){$code=0};exit $code"`
-	err := runSSHInput(
-		ctx,
-		target,
-		command,
-		strings.NewReader(remote),
-		&output,
-		&output,
-	)
+	err := runWindowsPowerShellScript(ctx, target, remote, &output, &output)
 	return strings.TrimSpace(output.String()), err
 }
 

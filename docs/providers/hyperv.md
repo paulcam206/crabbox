@@ -164,6 +164,16 @@ LocalSystem. Normal completion and failure paths delete the tasks, scripts,
 frames, archives, and protected directories; always stop the lease to remove the
 VM and differencing disk.
 
+Two Windows-specific constraints shape this path. Crabbox copies any PowerShell
+payload larger than 4 KB to the guest and runs it with a short argument-based
+command, because Windows OpenSSH intermittently wedges its per-connection event
+loop while forwarding a large stdin payload; when that happens the guest never
+finishes reading stdin and ssh aborts with `Timeout, server <host> not
+responding` even though the guest is healthy. The terminal command also exports
+`MSYS2_ARG_CONV_EXCL='*'` and `MSYS_NO_PATHCONV=1`, because Git for Windows
+otherwise rewrites switches such as `cmd.exe /d /c` into paths and opens an
+interactive shell instead of running the requested command.
+
 Actions runner, screenshot, and video task setup decode
 `windows.password` as strict UTF-8, preserve Unicode plus leading/trailing
 whitespace exactly, and reject only a zero-length file. The credential is never
