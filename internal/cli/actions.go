@@ -2736,19 +2736,14 @@ exit $LASTEXITCODE
 $log = Join-Path $runnerDir "crabbox-runner.log"
 $err = Join-Path $runnerDir "crabbox-runner.err.log"
 $taskName = ("crabbox-actions-runner-" + ($env:RUNNER_NAME -replace "[^A-Za-z0-9_.-]", "-"))
-$passwordPath = %s
-if (Test-Path -LiteralPath $passwordPath) {
+%s
+if ($null -ne $logonValue) {
   Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
   $argument = '-NoLogo -NoProfile -ExecutionPolicy Bypass -File "' + $runScript + '"'
   $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $argument
   $trigger = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(5))
   $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero)
-  $rawBytes = [IO.File]::ReadAllBytes($passwordPath)
-  if ($rawBytes.Length -eq 0) {
-    throw "Windows runner credential file is empty"
-  }
-  $utf8 = New-Object System.Text.UTF8Encoding($false, $true)
-  $decoded = $utf8.GetString($rawBytes)
+  $decoded = $logonValue
   Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -User (whoami) -Password $decoded -RunLevel Highest -Force | Out-Null
   Start-ScheduledTask -TaskName $taskName
   Write-Output ("started runner task=" + $taskName)
@@ -2756,7 +2751,7 @@ if (Test-Path -LiteralPath $passwordPath) {
   $process = Start-Process -FilePath "powershell.exe" -ArgumentList @("-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $runScript) -WorkingDirectory $runnerDir -RedirectStandardOutput $log -RedirectStandardError $err -WindowStyle Hidden -PassThru
   Write-Output ("started runner pid=" + $process.Id)
 }
-`, psQuote(version), ephemeralArg, psQuote(WindowsActionsRunnerCredentialPath))
+`, psQuote(version), ephemeralArg, windowsRunnerCredentialReadPowerShell(WindowsActionsRunnerCredentialPath))
 }
 
 func githubActionsRegistrationToken(ctx context.Context, repo GitHubRepo, childEnvDenylist []string) (string, error) {

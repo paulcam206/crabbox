@@ -115,13 +115,48 @@ host command line. TightVNC receives a separate generated password stored at
 
 The desktop setup enables auto-logon and performs one expected Windows reboot.
 Acquisition waits for bounded PowerShell Direct readiness, reruns the marked
-idempotent setup after reboot, then waits for both SSH and loopback VNC
-readiness before recording `desktop=true`.
+idempotent setup after reboot, then waits for SSH, loopback VNC, and an active
+interactive session for the configured `--hyperv-user` with a running Explorer
+shell. TightVNC service readiness alone is not desktop readiness. If auto-logon
+settings were applied to an already-marked template but no usable session
+appears, acquisition performs at most two explicit bounded reboot retries,
+reapplies the idempotent setup, waits again, and requires repeated stable SSH
+probes.
+`desktop=true` is recorded only after all checks succeed.
 
 `--browser` is probe-only. After final SSH readiness, Crabbox accepts an
 existing Microsoft Edge or Google Chrome installation. It does not install a
 browser, and acquisition fails with a capability error when neither browser is
 present. The `browser=true` label is recorded only after the probe succeeds.
+
+For native Windows screenshot, video, and `desktop proof`, use a **fresh**
+desktop lease acquired by the pinned Crabbox binary. Retained leases are not
+backfilled with the credential/session contract. Git for Windows supplies
+Mintty, and MP4 encoding requires local `ffmpeg` on the Hyper-V host:
+
+```powershell
+& $crabboxPath warmup --provider hyperv --target windows --desktop --keep `
+  --hyperv-image 'E:\vhd\windows-template.vhdx' `
+  --hyperv-user crabbox --hyperv-switch 'Default Switch'
+
+ffmpeg -version
+& $crabboxPath desktop proof --provider hyperv --id <lease> `
+  --output 'E:\crabbox-proof\<lease>' -- cmd.exe /d /c "echo desktop-proof"
+
+& $crabboxPath stop --provider hyperv <lease>
+```
+
+Run this provider flow from a headless/session-0 wrapper. The proof launcher
+targets the active session belonging to the SSH user. Screenshot and video capture
+use short-lived interactive tasks in per-capture directories protected for only
+the lease user, Builtin Administrators, and LocalSystem. Normal completion and
+failure paths delete the tasks, scripts, frames, archives, and protected
+directories; always stop the lease to remove the VM and differencing disk.
+
+Actions runner, screenshot, and video task setup decode
+`windows.password` as strict UTF-8, preserve Unicode plus leading/trailing
+whitespace exactly, and reject only a zero-length file. The credential is never
+trimmed, logged, or added to native process arguments.
 
 ### Preparing a Windows template
 
@@ -320,16 +355,20 @@ During Windows `Acquire`, the provider:
    GitHub if `sshd` is absent, and keeps sshd stopped behind the quarantine rule
 8. Reapplies the final key-only config, validates `sshd_config`, regenerates
    per-lease SSH host keys, starts sshd, and removes the quarantine rule last
-9. Installs git (MinGit) if absent — required for Crabbox sync
-9. With `--desktop`, installs/configures loopback-only TightVNC, handles its
-   expected one-time reboot through bounded PowerShell Direct retries, and
-   reruns the marked setup idempotently
-10. Waits for SSH readiness on the injected key and, for `--desktop`, loopback
-    VNC readiness
-11. Attaches requested cache VHDXs and initializes/mounts them through bounded
+9. Installs full, pinned Git for Windows (including Mintty) for `--desktop`;
+   otherwise installs pinned MinGit when git is absent
+10. With `--desktop`, installs/configures loopback-only TightVNC, handles its
+    expected setup reboot through bounded PowerShell Direct retries, and reruns
+    the marked setup idempotently
+11. Waits for SSH readiness on the injected key and, for `--desktop`, loopback
+    VNC plus an active Explorer-backed session for the configured guest user,
+    followed by repeated stable SSH probes.
+    When auto-logon settings have not taken effect, it performs at most two
+    explicit reboot retries and repeats the bounded readiness checks
+12. Attaches requested cache VHDXs and initializes/mounts them through bounded
     PowerShell Direct
-12. With `--browser`, probes for Edge or Chrome without installing either
-13. Records successful desktop/browser/cache lease labels only after all requested
+13. With `--browser`, probes for Edge or Chrome without installing either
+14. Records successful desktop/browser/cache lease labels only after all requested
     readiness checks pass
 
 PowerShell Direct calls use the guest administrator password. Readiness and
