@@ -1088,15 +1088,7 @@ func runDesktopLaunchRemoteCombinedOutput(ctx context.Context, target SSHTarget,
 		return runSSHCombinedOutput(ctx, target, remote)
 	}
 	var output bytes.Buffer
-	command := `powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$path=Join-Path $env:TEMP ('crabbox-desktop-launch-command-'+[Guid]::NewGuid().ToString('N')+'.ps1');$source=[Console]::In.ReadToEnd();[IO.File]::WriteAllText($path,$source,(New-Object Text.UTF8Encoding($false)));try{& powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $path;$code=$LASTEXITCODE}finally{Remove-Item -Force -LiteralPath $path -ErrorAction SilentlyContinue};if($null -eq $code){$code=0};exit $code"`
-	err := runSSHInput(
-		ctx,
-		target,
-		command,
-		strings.NewReader(remote),
-		&output,
-		&output,
-	)
+	err := runWindowsPowerShellScript(ctx, target, remote, &output, &output)
 	return strings.TrimSpace(output.String()), err
 }
 
