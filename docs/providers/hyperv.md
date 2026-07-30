@@ -55,11 +55,20 @@ a generalized VHDX.
 
 ### Host permissions and doctor
 
-Run Crabbox on the Hyper-V host from an elevated shell or an account authorized
-to manage Hyper-V VMs, firmware, switches, VHDXs, and storage. For unattended
-provider validation, prefer a headless/session-0 runner: failed early
-PowerShell Direct authentication can display credential UI on an interactive
-desktop even when Crabbox itself is non-interactive.
+Run Crabbox on the Hyper-V host from an account authorized to manage Hyper-V
+VMs, firmware, switches, VHDXs, and storage. Membership in the local
+`Hyper-V Administrators` group is sufficient and needs no elevation; otherwise
+use an elevated shell.
+
+Do not run the host-side Crabbox process as `LocalSystem`. Session 0 is only a
+convenience for **unattended** hosts, where failed early PowerShell Direct
+authentication can display credential UI that no one dismisses. It is unrelated
+to the guest interactive desktop that `--desktop` and `desktop proof` establish
+inside the VM. A `LocalSystem` host process resolves a different profile, so SSH
+known-hosts, Crabbox config, and `PATH` differ from the invoking user, per-user
+tools such as `ffmpeg` are missing, leftover state becomes `LocalSystem`-owned
+and needs elevation to remove, and elevation wrappers can corrupt captured
+command output.
 
 `crabbox doctor --provider hyperv` is non-mutating. It checks that the host is
 Windows, queries the Hyper-V optional feature, inventories VMs, and reports the
@@ -146,12 +155,14 @@ ffmpeg -version
 & $crabboxPath stop --provider hyperv <lease>
 ```
 
-Run this provider flow from a headless/session-0 wrapper. The proof launcher
-targets the active session belonging to the SSH user. Screenshot and video capture
-use short-lived interactive tasks in per-capture directories protected for only
-the lease user, Builtin Administrators, and LocalSystem. Normal completion and
-failure paths delete the tasks, scripts, frames, archives, and protected
-directories; always stop the lease to remove the VM and differencing disk.
+Run this provider flow as the invoking interactive user, not as `LocalSystem`.
+The interactive session the proof requires is the guest session belonging to the
+SSH user, which the proof launcher targets; the host-side session is irrelevant.
+Screenshot and video capture use short-lived interactive tasks in per-capture
+directories protected for only the lease user, Builtin Administrators, and
+LocalSystem. Normal completion and failure paths delete the tasks, scripts,
+frames, archives, and protected directories; always stop the lease to remove the
+VM and differencing disk.
 
 Actions runner, screenshot, and video task setup decode
 `windows.password` as strict UTF-8, preserve Unicode plus leading/trailing

@@ -183,8 +183,9 @@ Crabbox binary used for the proof. Acquisition waits for loopback VNC and a
 usable active desktop session for `--hyperv-user`; if auto-logon has not taken
 effect, it performs at most two explicit reboot retries before the final bounded
 readiness wait and verifies SSH remains stable after the reboot. Older retained
-leases are not upgraded in place. Run the
-provider flow headlessly/session 0, then always release the proof lease:
+leases are not upgraded in place. Run the provider flow as the invoking
+interactive user rather than as `LocalSystem`, then always release the proof
+lease:
 
 ```powershell
 & $crabboxPath warmup --provider hyperv --target windows --desktop --keep `
