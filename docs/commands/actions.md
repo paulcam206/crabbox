@@ -30,7 +30,7 @@ hydrate  --id <lease-id-or-slug> [--provider <provider>] [--target linux|macos|w
 
 register --id <lease-id-or-slug> [--provider <provider>] [--target linux|macos|windows]
          [--windows-mode normal|wsl2] [--repo owner/name] [--name <runner-name>]
-         [--labels <csv>] [--version latest] [--ephemeral=true] [--reclaim]
+         [--labels <csv>] [--version latest] [--ephemeral=true] [--wait-timeout 20m] [--reclaim]
 
 dispatch [--repo owner/name] [--workflow <file|name|id>] [--ref <ref>] [-f key=value] [--field key=value]
 ```
@@ -56,6 +56,19 @@ Local hydration supports Linux and Windows WSL2 targets. With
 commands through `provider=ssh`, but Actions hydration still requires Linux,
 Windows WSL2, or native Windows with `--github-runner`.
 
+For GitHub-runner hydration, `--wait-timeout` is one total budget for runner
+installation and registration, GitHub online readiness, workflow dispatch, and
+the hydration marker. Crabbox prints secret-free setup stages such as
+`release-metadata`, `archive-download`, `checksum`, `extraction`, `configure`,
+and `service-start`. It does not dispatch the workflow until GitHub reports the
+exact generated runner name as online and idle.
+
+If setup or online readiness consumes the budget, the command fails before
+workflow dispatch and reports the last completed stage or runner status. Guest
+configuration, service/Scheduled Task, and runner diagnostic logs are retained
+under the runner directory; bounded diagnostic tails are included when
+available. Registration tokens and Windows guest passwords remain redacted.
+
 Blacksmith Testbox IDs (`tbx_...`) and `--provider blacksmith-testbox` are
 skipped, because Blacksmith owns Testbox hydration. Run commands against those
 boxes directly with `crabbox run --provider blacksmith-testbox --id <tbx_id> -- ...`.
@@ -69,20 +82,22 @@ run URL when the marker reports a run ID.
 
 Registers an existing box as a GitHub Actions self-hosted runner. Crabbox
 obtains a repository registration token through `gh api`, installs the official
-`actions/runner` package, and starts it under systemd on Linux/WSL2 or a
-detached PowerShell process on native Windows. Supports Linux and Windows
-targets only. Registration metadata and the short-lived token travel over SSH
-stdin rather than the remote process command line.
+`actions/runner` package, starts it under systemd on Linux/WSL2 or a Scheduled
+Task/detached PowerShell process on native Windows, and waits until GitHub
+reports the exact runner online and idle. Supports Linux and Windows targets only.
+Registration metadata and the short-lived token travel over SSH stdin rather
+than the remote process command line.
 
 ```sh
 crabbox actions register --id blue-lobster
 ```
 
-Each runner gets the labels `crabbox`, the canonical lease label
-`crabbox-<lease-id>`, profile/class labels, the slug label when available, and
-any labels from `actions.runnerLabels` or `--labels`. Runner names use the
-friendly slug when available; workflow inputs and state-file paths keep using the
-canonical `cbx_...` ID.
+`--wait-timeout` bounds setup and online readiness as one operation. Each runner
+gets the labels `crabbox`, the canonical lease label `crabbox-<lease-id>`,
+profile/class labels, the slug label when available, and any labels from
+`actions.runnerLabels` or `--labels`. Runner names use the friendly slug when
+available; workflow inputs and state-file paths keep using the canonical
+`cbx_...` ID.
 
 ### dispatch
 

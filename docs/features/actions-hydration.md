@@ -67,6 +67,37 @@ You can also hydrate explicitly: `crabbox actions hydrate --id <id>` syncs the
 current checkout and then runs the hydrate workflow. Automatic hydration during
 `crabbox run` reuses the run's own sync rather than syncing twice.
 
+## GitHub-runner lifecycle and timeout
+
+GitHub-runner hydration uses a single bounded lifecycle:
+
+1. Crabbox claims the lease and keeps both coordinator-backed and direct SSH
+   leases alive while hydration is active.
+2. It obtains a short-lived repository runner token and installs the official
+   runner while reporting secret-free stages: release metadata, archive
+   download, checksum verification, extraction, configuration, and
+   service/Scheduled Task startup.
+3. It polls the repository runners API for the exact generated runner name.
+   Workflow dispatch is blocked until GitHub reports that runner `online` and idle.
+4. It clears the old marker, validates supported workflow inputs, dispatches the
+   workflow, and waits for the new hydration marker.
+
+`--wait-timeout` defaults to 20 minutes and must be positive. For
+`--github-runner`, it is one total budget shared by all four steps rather than a
+marker-only timeout. `actions register` uses the same timeout contract for
+runner setup and online-and-idle readiness.
+
+A setup or online-readiness timeout occurs before workflow dispatch and reports
+the last setup stage or runner status. A post-dispatch timeout reports the last
+SSH marker-probe error when one is available. Crabbox retains bounded setup and
+runner diagnostics under `$HOME/actions-runner` (including `crabbox-config.log`
+and `_diag` logs); native Windows diagnostics also report Scheduled Task and
+runner-process state.
+
+Registration tokens and Windows guest passwords are never written to progress
+output. Diagnostic text is bounded and redacts the short-lived registration
+token before it is returned to the host.
+
 ## Local hydration details
 
 For local hydration Crabbox picks the workflow job to run in this order:

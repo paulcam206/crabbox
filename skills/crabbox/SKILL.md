@@ -137,6 +137,11 @@ or unsupported `uses:` steps:
 crabbox actions hydrate --github-runner --id <cbx_id-or-slug>
 ```
 
+For `--github-runner`, pass `--repo owner/name` when the branch is on a fork.
+`--wait-timeout` is the total budget for runner setup, GitHub online readiness,
+workflow dispatch, and the hydration marker. Crabbox reports secret-free setup
+stages and will not dispatch until the exact generated runner is online and idle.
+
 ## Sync And Fresh Checkouts
 
 Normal sync transfers tracked files plus non-ignored untracked files, excludes
