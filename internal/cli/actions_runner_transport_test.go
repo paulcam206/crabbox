@@ -8,6 +8,31 @@ import (
 // The Windows runner install script is well over the stdin threshold, so it
 // must travel as a file. Streaming it strands setup before the guest emits its
 // first stage, with no diagnostics to read.
+// A future one-time trigger would launch a second runner after the ephemeral
+// runner has consumed its registration and deleted its config, producing a
+// "Not configured" failure and no usable runner.
+func TestWindowsActionsRunnerTaskHasNoDelayedTrigger(t *testing.T) {
+	script := githubActionsRunnerInstallScriptForTarget(
+		"",
+		true,
+		SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal},
+	)
+	if strings.Contains(script, "AddMinutes(5)") {
+		t.Fatal("runner scheduled task must not register a delayed one-time trigger")
+	}
+	if strings.Contains(script, "-Trigger $trigger") {
+		t.Fatal("runner scheduled task must be started explicitly, not by a trigger")
+	}
+	for _, want := range []string{
+		"-MultipleInstances IgnoreNew",
+		"Start-ScheduledTask -TaskName $taskName",
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("runner scheduled task missing %q", want)
+		}
+	}
+}
+
 func TestWindowsActionsRunnerInstallScriptExceedsStdinThreshold(t *testing.T) {
 	script := githubActionsRunnerInstallScriptForTarget(
 		"",
