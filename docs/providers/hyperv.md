@@ -177,6 +177,13 @@ responding` even though the guest is healthy. The terminal command also exports
 otherwise rewrites switches such as `cmd.exe /d /c` into paths and opens an
 interactive shell instead of running the requested command.
 
+Desktop bootstrap also disables the guest display and standby timeouts and the
+screensaver. A blanked virtual display freezes the framebuffer, so screenshots
+and VNC keep returning the last rendered frame and any window launched
+afterwards never appears in a capture. Because the terminal still starts and is
+recorded in metadata, the proof would otherwise report success while producing
+a stale image.
+
 Actions runner, screenshot, and video task setup decode
 `windows.password` as strict UTF-8, preserve Unicode plus leading/trailing
 whitespace exactly, and reject only a zero-length file. The credential is never

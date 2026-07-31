@@ -589,6 +589,35 @@ func TestAWSUserDataDefaultsToCloudInit(t *testing.T) {
 	}
 }
 
+// A blanked virtual display freezes the guest framebuffer, so screenshots and
+// VNC keep returning the last rendered frame. Desktop proof then produces
+// convincing but meaningless artifacts: the terminal launches and is recorded
+// in metadata, yet never appears in the capture.
+func TestWindowsDesktopBootstrapKeepsDisplayAwake(t *testing.T) {
+	script := windowsDesktopBootstrapPowerShell()
+	for _, want := range []string{
+		"monitor-timeout-ac",
+		"monitor-timeout-dc",
+		"standby-timeout-ac",
+		"standby-timeout-dc",
+		"ScreenSaveActive",
+		"ScreenSaveTimeOut",
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("windows desktop bootstrap must disable %q so the framebuffer keeps updating", want)
+		}
+	}
+	if !strings.Contains(script, `Registry::HKEY_USERS\.DEFAULT\Control Panel\Desktop`) {
+		t.Fatal("windows desktop bootstrap should also clear the screensaver for the default user hive")
+	}
+	// Hyper-V reaches this through the managed bootstrap, which is the path that
+	// produced frozen captures in practice.
+	managed := ManagedWindowsDesktopBootstrapPowerShell("crabbox")
+	if !strings.Contains(managed, "monitor-timeout-ac") || !strings.Contains(managed, "ScreenSaveActive") {
+		t.Fatal("managed windows desktop bootstrap must also keep the display awake")
+	}
+}
+
 func TestAWSUserDataWindowsProfile(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Provider = "aws"
@@ -661,6 +690,9 @@ func TestAWSUserDataWindowsProfile(t *testing.T) {
 		`C:\ProgramData\crabbox\windows.username`,
 		"AutoAdminLogon",
 		"DefaultDomainName",
+		"monitor-timeout-ac",
+		"standby-timeout-ac",
+		"ScreenSaveActive",
 		"Test-Path -LiteralPath $oobe",
 		"PrivacyConsentStatus",
 		"SetupDisplayedEula",

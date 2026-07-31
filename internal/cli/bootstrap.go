@@ -607,6 +607,19 @@ Remove-Item -Force -LiteralPath (Join-Path (Join-Path (Join-Path "C:\Users" $use
 Get-Process tvnserver -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -ne 0 } | Stop-Process -Force -ErrorAction SilentlyContinue
 Get-Service -Name tvnserver | Set-Service -StartupType Automatic
 Start-Service -Name tvnserver
+# A blanked virtual display freezes the framebuffer, so screenshots and VNC keep
+# returning the last rendered frame and anything launched afterwards never
+# appears in captures. Keep the display awake for the life of the lease.
+foreach ($powerSetting in @("monitor-timeout-ac", "monitor-timeout-dc", "standby-timeout-ac", "standby-timeout-dc")) {
+  & powercfg.exe /change $powerSetting 0 | Out-Null
+}
+foreach ($desktopKey in @("HKCU:\Control Panel\Desktop", "Registry::HKEY_USERS\.DEFAULT\Control Panel\Desktop")) {
+  if (Test-Path -LiteralPath $desktopKey) {
+    Set-ItemProperty -LiteralPath $desktopKey -Name ScreenSaveActive -Value "0" -Type String
+    Set-ItemProperty -LiteralPath $desktopKey -Name ScreenSaveTimeOut -Value "0" -Type String
+    Set-ItemProperty -LiteralPath $desktopKey -Name ScreenSaverIsSecure -Value "0" -Type String
+  }
+}
 $winlogon = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon"
 $oobe = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\OOBE"
 if (-not (Test-Path -LiteralPath $oobe)) {
