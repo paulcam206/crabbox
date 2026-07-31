@@ -3033,10 +3033,12 @@ if ($null -ne $logonValue) {
   Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
   $argument = '-NoLogo -NoProfile -ExecutionPolicy Bypass -File "' + $runScript + '"'
   $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $argument
-  $trigger = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(5))
-  $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero)
+  # No trigger: the task is started explicitly below. A future one-time
+  # trigger would launch a second runner later, and an ephemeral runner that
+  # has already consumed its registration fails with "Not configured".
+  $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew
   $decoded = $logonValue
-  Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -User (whoami) -Password $decoded -RunLevel Highest -Force | Out-Null
+  Register-ScheduledTask -TaskName $taskName -Action $action -Settings $settings -User (whoami) -Password $decoded -RunLevel Highest -Force | Out-Null
   Start-ScheduledTask -TaskName $taskName
   Write-Output ("started runner task=" + $taskName)
 } else {
