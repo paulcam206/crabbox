@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -413,6 +414,19 @@ func (a App) registerGitHubActionsRunner(ctx context.Context, cfg Config, target
 	script := githubActionsRunnerInstallScriptForTarget(cfg.Actions.RunnerVersion, cfg.Actions.Ephemeral, target)
 	remote := githubActionsRunnerInstallRemoteCommand(target)
 	input := githubActionsRunnerInstallInput(ghRepo.Slug(), name, strings.Join(labels, ","), token, script)
+	// Windows OpenSSH intermittently wedges its per-connection event loop while
+	// forwarding a large stdin payload, which strands runner setup before the
+	// guest emits its first stage. Copy the script instead and keep only the
+	// short credential lines on stdin; the script itself carries no secrets.
+	if isWindowsNativeTarget(target) && windowsScriptNeedsFileTransport(script) {
+		remotePath, cleanup, err := uploadWindowsActionsRunnerScript(bootstrapCtx, target, script)
+		if err != nil {
+			return err
+		}
+		defer cleanup()
+		remote = githubActionsRunnerInstallRemoteCommandForUploadedScript(remotePath)
+		input = githubActionsRunnerCredentialInput(ghRepo.Slug(), name, strings.Join(labels, ","), token)
+	}
 	setup, err := runActionsRunnerSetup(bootstrapCtx, a.Stderr, func(stdout, stderr io.Writer) error {
 		return runSSHInput(bootstrapCtx, target, remote, strings.NewReader(input), stdout, stderr)
 	})
@@ -441,6 +455,45 @@ func (a App) registerGitHubActionsRunner(ctx context.Context, cfg Config, target
 		return exit(exitCodeForError(err, 5), "%v; guest diagnostics: %s", err, blank(diagnostics, "no diagnostics available"))
 	}
 	return nil
+}
+
+// uploadWindowsActionsRunnerScript copies the install script to the guest and
+// returns its remote path plus a best-effort cleanup for the failure paths that
+// never reach the remote command's own finally block.
+func uploadWindowsActionsRunnerScript(ctx context.Context, target SSHTarget, script string) (string, func(), error) {
+	localDir, err := os.MkdirTemp("", "crabbox-runner")
+	if err != nil {
+		return "", nil, exit(2, "create temp runner script dir: %v", err)
+	}
+	defer func() { _ = os.RemoveAll(localDir) }()
+
+	localScript := filepath.Join(localDir, "install-runner.ps1")
+	// Windows PowerShell 5.1 only treats a -File script as UTF-8 when it starts
+	// with a byte-order mark.
+	if err := os.WriteFile(localScript, append([]byte{0xEF, 0xBB, 0xBF}, []byte(script)...), 0o600); err != nil {
+		return "", nil, exit(2, "write runner install script: %v", err)
+	}
+
+	token := strconv.FormatInt(time.Now().UnixNano(), 36)
+	remoteDir := `C:\ProgramData\crabbox`
+	remotePath := "C:/ProgramData/crabbox/install-runner-" + token + ".ps1"
+	remotePathPS := strings.ReplaceAll(remotePath, "/", `\`)
+
+	prepare := `powershell.exe -NoLogo -NoProfile -NonInteractive -Command "New-Item -ItemType Directory -Force -Path ` + psQuote(remoteDir) + ` | Out-Null"`
+	if err := runSSHInput(ctx, target, prepare, nil, io.Discard, io.Discard); err != nil {
+		return "", nil, err
+	}
+	if err := copyLocalFileToTarget(ctx, target, localScript, remotePath); err != nil {
+		return "", nil, err
+	}
+
+	cleanup := func() {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		remove := `powershell.exe -NoLogo -NoProfile -NonInteractive -Command "Remove-Item -Force -LiteralPath ` + psQuote(remotePathPS) + ` -ErrorAction SilentlyContinue"`
+		_ = runSSHInput(cleanupCtx, target, remove, nil, io.Discard, io.Discard)
+	}
+	return remotePathPS, cleanup, nil
 }
 
 func supportsActionsRunnerTarget(target SSHTarget) bool {
@@ -2744,17 +2797,7 @@ func githubActionsRunnerInstallScriptForTarget(version string, ephemeral bool, t
 
 func githubActionsRunnerInstallRemoteCommand(target SSHTarget) string {
 	if isWindowsNativeTarget(target) {
-		return powershellCommand(`$ErrorActionPreference = "Stop"
-function Read-CrabboxRunnerValue {
-  $line = [Console]::In.ReadLine()
-  if ($null -eq $line) { throw "missing runner registration input" }
-  [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($line))
-}
-$env:RUNNER_REPO = Read-CrabboxRunnerValue
-$env:RUNNER_NAME = Read-CrabboxRunnerValue
-$env:RUNNER_LABELS = Read-CrabboxRunnerValue
-$env:RUNNER_TOKEN = Read-CrabboxRunnerValue
-$script = [Console]::In.ReadToEnd()
+		return powershellCommand(githubActionsRunnerCredentialPrelude + `$script = [Console]::In.ReadToEnd()
 $path = Join-Path $env:TEMP ("crabbox-actions-runner-" + [Guid]::NewGuid().ToString("N") + ".ps1")
 [System.IO.File]::WriteAllText($path, $script, [System.Text.UTF8Encoding]::new($false))
 try {
@@ -2778,13 +2821,45 @@ unset crabbox_runner_repo crabbox_runner_name crabbox_runner_labels crabbox_runn
 exec bash -s`
 }
 
+const githubActionsRunnerCredentialPrelude = `$ErrorActionPreference = "Stop"
+function Read-CrabboxRunnerValue {
+  $line = [Console]::In.ReadLine()
+  if ($null -eq $line) { throw "missing runner registration input" }
+  [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($line))
+}
+$env:RUNNER_REPO = Read-CrabboxRunnerValue
+$env:RUNNER_NAME = Read-CrabboxRunnerValue
+$env:RUNNER_LABELS = Read-CrabboxRunnerValue
+$env:RUNNER_TOKEN = Read-CrabboxRunnerValue
+`
+
+// githubActionsRunnerInstallRemoteCommandForUploadedScript runs an install
+// script that was copied to the guest instead of streamed over stdin. Only the
+// four base64 credential lines still cross stdin, so the registration token
+// never reaches the guest filesystem or a command line.
+func githubActionsRunnerInstallRemoteCommandForUploadedScript(remotePath string) string {
+	return powershellCommand(githubActionsRunnerCredentialPrelude + `$path = ` + psQuote(remotePath) + `
+try {
+  & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $path
+  exit $LASTEXITCODE
+} finally {
+  Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+}
+`)
+}
+
 func githubActionsRunnerInstallInput(repo, name, labels, token, script string) string {
+	return githubActionsRunnerCredentialInput(repo, name, labels, token) + script
+}
+
+// githubActionsRunnerCredentialInput is the stdin payload when the install
+// script travels as a file: four short base64 lines and nothing else.
+func githubActionsRunnerCredentialInput(repo, name, labels, token string) string {
 	var input strings.Builder
 	for _, value := range []string{repo, name, labels, token} {
 		input.WriteString(base64.StdEncoding.EncodeToString([]byte(value)))
 		input.WriteByte('\n')
 	}
-	input.WriteString(script)
 	return input.String()
 }
 

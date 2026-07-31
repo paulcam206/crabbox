@@ -98,6 +98,15 @@ Registration tokens and Windows guest passwords are never written to progress
 output. Diagnostic text is bounded and redacts the short-lived registration
 token before it is returned to the host.
 
+On native Windows the runner install script is copied to the guest and executed
+from that file rather than streamed over SSH stdin. Windows OpenSSH
+intermittently wedges its per-connection event loop while forwarding a payload
+of this size, which strands setup before the guest reports its first stage and
+leaves no guest logs to collect. Only the four short base64 credential lines
+still cross stdin, so the short-lived registration token never reaches the guest
+filesystem or a command line. The copied script is removed on both the success
+and failure paths.
+
 ## Local hydration details
 
 For local hydration Crabbox picks the workflow job to run in this order:
