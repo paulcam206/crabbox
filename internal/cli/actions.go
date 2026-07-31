@@ -45,7 +45,7 @@ func (a App) actionsHydrate(ctx context.Context, args []string) error {
 	workflowFlag := fs.String("workflow", "", "workflow file/name/id")
 	jobFlag := fs.String("job", "", "expected hydrate workflow job/input name")
 	refFlag := fs.String("ref", "", "workflow ref")
-	waitTimeout := fs.Duration("wait-timeout", 20*time.Minute, "time to wait for Actions hydration")
+	waitTimeout := fs.Duration("wait-timeout", defaultActionsWaitTimeout, "total time allowed for Actions hydration")
 	keepAliveMinutes := fs.Int("keep-alive-minutes", 90, "minutes for workflow to keep the job alive")
 	githubRunner := fs.Bool("github-runner", false, "hydrate by registering a GitHub self-hosted runner instead of local SSH execution")
 	reclaim := fs.Bool("reclaim", false, "claim this lease for the current repo")
@@ -55,6 +55,9 @@ func (a App) actionsHydrate(ctx context.Context, args []string) error {
 	fs.Var(&fieldFlags, "field", "workflow input key=value")
 	if err := parseFlags(fs, args); err != nil {
 		return err
+	}
+	if *waitTimeout <= 0 {
+		return exit(2, "actions hydrate --wait-timeout must be greater than zero")
 	}
 	if *leaseIDFlag == "" {
 		return exit(2, "actions hydrate requires --id")
@@ -137,7 +140,8 @@ func (a App) actionsHydrate(ctx context.Context, args []string) error {
 	if err := waitForSSHReady(ctx, &target, a.Stderr, "actions hydrate", 2*time.Minute); err != nil {
 		return err
 	}
-	if _, err := updateLeaseClaimEndpointIfUnchanged(leaseID, ownedClaim, server, target); err != nil {
+	ownedClaim, err = updateLeaseClaimEndpointIfUnchanged(leaseID, ownedClaim, server, target)
+	if err != nil {
 		return err
 	}
 	a.registerCoordinatorLeaseBestEffort(ctx, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID})
@@ -145,22 +149,28 @@ func (a App) actionsHydrate(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if coord := backendCoordinator(backend); coord != nil {
-		stopHeartbeat := startCoordinatorHeartbeat(ctx, coord, leaseID, cfg.IdleTimeout, nil, leaseTelemetryCollectorForTarget(target), a.Stderr)
-		defer stopHeartbeat()
-	} else if sshBackend, ok := backend.(SSHLeaseBackend); ok {
-		_, err := sshBackend.Touch(ctx, TouchRequest{Lease: LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, State: blank(server.Labels["state"], "ready"), IdleTimeout: cfg.IdleTimeout})
-		if err != nil {
-			fmt.Fprintf(a.Stderr, "warning: touch failed for %s: %v\n", leaseID, err)
-		}
-	}
+	operationCtx, cancelOperation := context.WithCancelCause(ctx)
+	defer cancelOperation(nil)
+	stopHeartbeat := startActionsLeaseHeartbeat(
+		operationCtx,
+		cancelOperation,
+		backend,
+		LeaseTarget{Server: server, SSH: target, LeaseID: leaseID},
+		ownedClaim,
+		cfg,
+		a.Stderr,
+	)
+	defer stopHeartbeat()
 	label := githubActionsLeaseLabel(leaseID)
 	ref := actionsRef(cfg, repo)
 	extraFields := mergeWorkflowInputFields(cfg.Actions.Fields, fieldFlags)
 	fields := actionsHydrateFields(leaseID, label, cfg.Actions.Job, *keepAliveMinutes, extraFields)
 	if !*githubRunner {
 		localFields := actionsHydrateFields(leaseID, label, cfg.Actions.Job, 0, extraFields)
-		if state, err := a.hydrateActionsLocally(ctx, cfg, repo, target, leaseID, cfg.Actions.Job, localFields, *waitTimeout, true, true); err == nil {
+		if state, err := a.hydrateActionsLocally(operationCtx, cfg, repo, target, leaseID, cfg.Actions.Job, localFields, *waitTimeout, true, true); err == nil {
+			if cause := actionsOperationCause(operationCtx); cause != nil {
+				return cause
+			}
 			fmt.Fprintf(a.Stdout, "actions hydrated local id=%s slug=%s workspace=%s run_id=%s\n", leaseID, blank(slug, "-"), state.Workspace, blank(state.RunID, "-"))
 			fmt.Fprintf(a.Stdout, "actions hydrate complete total=%s\n", time.Since(started).Round(time.Millisecond))
 			if *timingJSON {
@@ -177,6 +187,9 @@ func (a App) actionsHydrate(ctx context.Context, args []string) error {
 			}
 			return nil
 		} else {
+			if cause := actionsOperationCause(operationCtx); cause != nil {
+				return cause
+			}
 			return exit(exitCodeForError(err, 7), "local Actions hydration failed for %s: %v; rerun with --github-runner when the workflow needs full GitHub Actions semantics", leaseID, err)
 		}
 	}
@@ -184,9 +197,17 @@ func (a App) actionsHydrate(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	state, err := a.hydrateActionsWithGitHubRunner(ctx, cfg, repo, target, leaseID, slug, ghRepo, label, ref, fields, *waitTimeout)
+	hydrateCtx, cancelHydrate := context.WithTimeout(operationCtx, *waitTimeout)
+	defer cancelHydrate()
+	state, err := a.hydrateActionsWithGitHubRunner(hydrateCtx, cfg, repo, target, leaseID, slug, ghRepo, label, ref, fields)
 	if err != nil {
+		if cause := actionsOperationCause(operationCtx); cause != nil {
+			return cause
+		}
 		return err
+	}
+	if cause := actionsOperationCause(operationCtx); cause != nil {
+		return cause
 	}
 	fmt.Fprintf(a.Stdout, "actions hydrated id=%s slug=%s workspace=%s run_id=%s\n", leaseID, blank(slug, "-"), state.Workspace, blank(state.RunID, "-"))
 	fmt.Fprintf(a.Stdout, "actions hydrate complete total=%s\n", time.Since(started).Round(time.Millisecond))
@@ -206,45 +227,35 @@ func (a App) actionsHydrate(ctx context.Context, args []string) error {
 	return nil
 }
 
-func (a App) hydrateActionsWithGitHubRunner(ctx context.Context, cfg Config, repo Repo, target SSHTarget, leaseID, slug string, ghRepo GitHubRepo, label, ref string, fields []string, waitTimeout time.Duration) (actionsHydrationState, error) {
-	if err := a.registerGitHubActionsRunner(ctx, cfg, target, leaseID, slug, ghRepo, "", nil); err != nil {
-		return actionsHydrationState{}, err
-	}
-	if err := clearActionsHydrationState(ctx, target, leaseID); err != nil {
-		return actionsHydrationState{}, err
-	}
-	if inputs, ok, err := githubWorkflowDispatchInputs(ctx, repo.Root, ghRepo, cfg.Actions.Workflow, ref, target.ChildEnvDenylist); err != nil {
-		fmt.Fprintf(a.Stderr, "warning: inspect workflow inputs failed: %v\n", err)
-	} else if ok {
-		filtered, dropped := filterWorkflowInputs(fields, inputs)
-		for _, field := range dropped {
-			fmt.Fprintf(a.Stderr, "warning: workflow %s does not declare input %s; omitting it\n", cfg.Actions.Workflow, fieldName(field))
-		}
-		fields = filtered
-		for _, required := range []string{"crabbox_id", "crabbox_runner_label", "crabbox_keep_alive_minutes"} {
-			if !inputs[required] {
-				return actionsHydrationState{}, exit(2, "workflow %s at %s does not declare required hydrate input %s", cfg.Actions.Workflow, ref, required)
-			}
-		}
-	}
-	expectedJob := cfg.Actions.Job
-	if !workflowFieldsContain(fields, "crabbox_job") {
-		expectedJob = ""
-	}
-	if err := dispatchGitHubActionsWorkflow(ctx, repo.Root, ghRepo, cfg.Actions.Workflow, ref, fields, target.ChildEnvDenylist); err != nil {
-		if expectedJob != "" && strings.Contains(err.Error(), "Unexpected input") {
-			fields = dropWorkflowField(fields, "crabbox_job")
-			expectedJob = ""
-			fmt.Fprintf(a.Stderr, "warning: retrying workflow dispatch without crabbox_job for compatibility\n")
-			if retryErr := dispatchGitHubActionsWorkflow(ctx, repo.Root, ghRepo, cfg.Actions.Workflow, ref, fields, target.ChildEnvDenylist); retryErr != nil {
-				return actionsHydrationState{}, retryErr
-			}
-		} else {
-			return actionsHydrationState{}, err
-		}
-	}
-	fmt.Fprintf(a.Stdout, "dispatched workflow=%s repo=%s ref=%s runner_label=%s\n", cfg.Actions.Workflow, ghRepo.Slug(), ref, label)
-	return waitForActionsHydration(ctx, target, leaseID, expectedJob, waitTimeout, a.Stderr)
+func (a App) hydrateActionsWithGitHubRunner(ctx context.Context, cfg Config, repo Repo, target SSHTarget, leaseID, slug string, ghRepo GitHubRepo, label, ref string, fields []string) (actionsHydrationState, error) {
+	return runGitHubRunnerHydration(
+		ctx,
+		cfg.Actions.Workflow,
+		ref,
+		cfg.Actions.Job,
+		fields,
+		a.Stderr,
+		githubRunnerHydrationHooks{
+			Register: func(stageCtx context.Context) error {
+				return a.registerGitHubActionsRunner(stageCtx, cfg, target, leaseID, slug, ghRepo, "", nil)
+			},
+			ClearState: func(stageCtx context.Context) error {
+				return clearActionsHydrationState(stageCtx, target, leaseID)
+			},
+			Inputs: func(stageCtx context.Context) (map[string]bool, bool, error) {
+				return githubWorkflowDispatchInputs(stageCtx, repo.Root, ghRepo, cfg.Actions.Workflow, ref, target.ChildEnvDenylist)
+			},
+			Dispatch: func(stageCtx context.Context, dispatchFields []string) error {
+				return dispatchGitHubActionsWorkflow(stageCtx, repo.Root, ghRepo, cfg.Actions.Workflow, ref, dispatchFields, target.ChildEnvDenylist)
+			},
+			OnDispatched: func() {
+				fmt.Fprintf(a.Stdout, "dispatched workflow=%s repo=%s ref=%s runner_label=%s\n", cfg.Actions.Workflow, ghRepo.Slug(), ref, label)
+			},
+			Wait: func(stageCtx context.Context, expectedJob string) (actionsHydrationState, error) {
+				return waitForActionsHydration(stageCtx, target, leaseID, expectedJob, 0, a.Stderr)
+			},
+		},
+	)
 }
 
 func (a App) actionsRegister(ctx context.Context, args []string) error {
@@ -261,8 +272,12 @@ func (a App) actionsRegister(ctx context.Context, args []string) error {
 	versionFlag := fs.String("version", "", "actions/runner version or latest")
 	ephemeralFlag := fs.Bool("ephemeral", true, "register runner as ephemeral")
 	reclaim := fs.Bool("reclaim", false, "claim this lease for the current repo")
+	waitTimeout := fs.Duration("wait-timeout", defaultActionsWaitTimeout, "total time allowed for runner setup and online readiness")
 	if err := parseFlags(fs, args); err != nil {
 		return err
+	}
+	if *waitTimeout <= 0 {
+		return exit(2, "actions register --wait-timeout must be greater than zero")
 	}
 	if *leaseIDFlag == "" {
 		return exit(2, "actions register requires --id")
@@ -301,8 +316,36 @@ func (a App) actionsRegister(ctx context.Context, args []string) error {
 	if err := a.claimResolvedLeaseTargetForRepoAndRegister(ctx, leaseID, slug, cfg, server, target, repo.Root, *reclaim); err != nil {
 		return err
 	}
-	a.touchLeaseTargetBestEffort(ctx, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, "")
-	return a.registerGitHubActionsRunner(ctx, cfg, target, leaseID, slug, ghRepo, *nameFlag, extraLabels)
+	ownedClaim, ownedClaimExists, err := resolveLeaseClaim(leaseID)
+	if err != nil {
+		return err
+	}
+	if !ownedClaimExists {
+		return exit(4, "actions register could not resolve the claimed lease %s", leaseID)
+	}
+	backend, err := loadBackend(cfg, runtimeForApp(a))
+	if err != nil {
+		return err
+	}
+	operationCtx, cancelOperation := context.WithCancelCause(ctx)
+	defer cancelOperation(nil)
+	stopHeartbeat := startActionsLeaseHeartbeat(
+		operationCtx,
+		cancelOperation,
+		backend,
+		LeaseTarget{Server: server, SSH: target, LeaseID: leaseID},
+		ownedClaim,
+		cfg,
+		a.Stderr,
+	)
+	defer stopHeartbeat()
+	registerCtx, cancelRegister := context.WithTimeout(operationCtx, *waitTimeout)
+	defer cancelRegister()
+	err = a.registerGitHubActionsRunner(registerCtx, cfg, target, leaseID, slug, ghRepo, *nameFlag, extraLabels)
+	if cause := actionsOperationCause(operationCtx); cause != nil {
+		return cause
+	}
+	return err
 }
 
 func (a App) actionsDispatch(ctx context.Context, args []string) error {
@@ -352,8 +395,14 @@ func (a App) registerGitHubActionsRunner(ctx context.Context, cfg Config, target
 	if !supportsGitHubActionsRunnerTarget(target) {
 		return exit(2, "actions runner registration currently supports Linux and Windows targets only")
 	}
-	token, err := githubActionsRegistrationToken(ctx, ghRepo, target.ChildEnvDenylist)
+	bootstrapCtx, cancelBootstrap := actionsRunnerBootstrapContext(ctx)
+	defer cancelBootstrap()
+	fmt.Fprintln(a.Stderr, "actions runner setup stage=registration-token")
+	token, err := githubActionsRegistrationToken(bootstrapCtx, ghRepo, target.ChildEnvDenylist)
 	if err != nil {
+		if bootstrapCtx.Err() == context.DeadlineExceeded {
+			return exit(5, "GitHub Actions runner setup timed out before registration token acquisition completed")
+		}
 		return err
 	}
 	name := nameOverride
@@ -364,10 +413,33 @@ func (a App) registerGitHubActionsRunner(ctx context.Context, cfg Config, target
 	script := githubActionsRunnerInstallScriptForTarget(cfg.Actions.RunnerVersion, cfg.Actions.Ephemeral, target)
 	remote := githubActionsRunnerInstallRemoteCommand(target)
 	input := githubActionsRunnerInstallInput(ghRepo.Slug(), name, strings.Join(labels, ","), token, script)
-	if err := runSSHInputQuiet(ctx, target, remote, input); err != nil {
-		return exit(7, "register GitHub Actions runner on %s: %v", target.Host, err)
+	setup, err := runActionsRunnerSetup(bootstrapCtx, a.Stderr, func(stdout, stderr io.Writer) error {
+		return runSSHInput(bootstrapCtx, target, remote, strings.NewReader(input), stdout, stderr)
+	})
+	if err != nil {
+		diagnostics := redactActionsRunnerText(setup.Diagnostics, token)
+		if diagnostics == "" {
+			diagnostics = readGitHubActionsRunnerDiagnosticsBestEffort(ctx, target, token)
+		}
+		if bootstrapCtx.Err() == context.DeadlineExceeded {
+			return exit(5, "GitHub Actions runner setup timed out on %s during stage=%s: %s", target.Host, blank(setup.LastStage, "bootstrap"), blank(diagnostics, "no diagnostics available"))
+		}
+		return exit(7, "register GitHub Actions runner on %s failed during stage=%s: %v: %s", target.Host, blank(setup.LastStage, "bootstrap"), err, blank(diagnostics, "no diagnostics available"))
 	}
 	fmt.Fprintf(a.Stdout, "actions runner registered repo=%s name=%s labels=%s ephemeral=%t\n", ghRepo.Slug(), name, strings.Join(labels, ","), cfg.Actions.Ephemeral)
+	if err := waitForGitHubActionsRunnerOnline(
+		bootstrapCtx,
+		ghRepo,
+		name,
+		5*time.Second,
+		func(lookupCtx context.Context) (githubActionsRunnerState, error) {
+			return githubActionsRunnerStateForName(lookupCtx, ghRepo, name, target.ChildEnvDenylist)
+		},
+		a.Stderr,
+	); err != nil {
+		diagnostics := readGitHubActionsRunnerDiagnosticsBestEffort(ctx, target, token)
+		return exit(exitCodeForError(err, 5), "%v; guest diagnostics: %s", err, blank(diagnostics, "no diagnostics available"))
+	}
 	return nil
 }
 
@@ -2173,23 +2245,71 @@ type actionsHydrationState struct {
 }
 
 func waitForActionsHydration(ctx context.Context, target SSHTarget, leaseID, expectedJob string, timeout time.Duration, stderr io.Writer) (actionsHydrationState, error) {
-	deadline := time.Now().Add(timeout)
+	waitCtx := ctx
+	cancel := func() {}
+	if timeout > 0 {
+		waitCtx, cancel = context.WithTimeout(ctx, timeout)
+	}
+	defer cancel()
+	return waitForActionsHydrationWithProbe(
+		waitCtx,
+		leaseID,
+		expectedJob,
+		10*time.Second,
+		stderr,
+		func(probeCtx context.Context) (actionsHydrationState, error) {
+			return readActionsHydrationState(probeCtx, target, leaseID)
+		},
+	)
+}
+
+func waitForActionsHydrationWithProbe(
+	ctx context.Context,
+	leaseID, expectedJob string,
+	interval time.Duration,
+	stderr io.Writer,
+	probe func(context.Context) (actionsHydrationState, error),
+) (actionsHydrationState, error) {
+	if interval <= 0 {
+		interval = 10 * time.Second
+	}
+	var lastProbeErr error
 	for {
-		state, err := readActionsHydrationState(ctx, target, leaseID)
+		state, err := probe(ctx)
 		if err == nil && state.Workspace != "" {
 			if expectedJob != "" && state.Job != "" && state.Job != expectedJob {
 				return actionsHydrationState{}, exit(5, "GitHub Actions hydration marker for %s came from job %q, expected %q", leaseID, state.Job, expectedJob)
 			}
 			return state, nil
 		}
-		if ctx.Err() != nil {
+		if err != nil {
+			lastProbeErr = err
+		} else {
+			lastProbeErr = nil
+		}
+		if lastProbeErr != nil {
+			fmt.Fprintf(stderr, "waiting for GitHub Actions hydration marker id=%s probe_error=%q...\n", leaseID, lastProbeErr.Error())
+		} else {
+			fmt.Fprintf(stderr, "waiting for GitHub Actions hydration marker id=%s...\n", leaseID)
+		}
+		timer := time.NewTimer(interval)
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			if ctx.Err() == context.DeadlineExceeded {
+				if lastProbeErr != nil {
+					return actionsHydrationState{}, exit(5, "timed out waiting for GitHub Actions hydration marker for %s: last SSH probe error: %v", leaseID, lastProbeErr)
+				}
+				return actionsHydrationState{}, exit(5, "timed out waiting for GitHub Actions hydration marker for %s", leaseID)
+			}
 			return actionsHydrationState{}, ctx.Err()
 		}
-		if time.Now().After(deadline) {
-			return actionsHydrationState{}, exit(5, "timed out waiting for GitHub Actions hydration marker for %s", leaseID)
-		}
-		fmt.Fprintf(stderr, "waiting for GitHub Actions hydration marker id=%s...\n", leaseID)
-		time.Sleep(10 * time.Second)
 	}
 }
 
@@ -2521,6 +2641,9 @@ if [ -z "${RUNNER_REPO:-}" ] || [ -z "${RUNNER_NAME:-}" ] || [ -z "${RUNNER_TOKE
   echo "missing runner env" >&2
   exit 2
 fi
+runner_stage() {
+  printf '`+actionsRunnerStagePrefix+`%%s\n' "$1" >&2
+}
 version=%s
 arch="$(uname -m)"
 case "$arch" in
@@ -2531,12 +2654,13 @@ esac
 if [ "$(id -u)" = 0 ]; then
   export RUNNER_ALLOW_RUNASROOT=1
 fi
+runner_stage release-metadata
 if [ "$version" = latest ]; then
   release_url=https://api.github.com/repos/actions/runner/releases/latest
 else
   release_url="https://api.github.com/repos/actions/runner/releases/tags/v${version}"
 fi
-release_json="$(curl -fsSL "$release_url")"
+release_json="$(curl --connect-timeout 15 --max-time 60 -fsSL "$release_url")"
 resolved_version="$(jq -er '.tag_name | strings | sub("^v"; "")' <<<"$release_json")"
 if [ "$version" != latest ] && [ "$resolved_version" != "$version" ]; then
   echo "runner release metadata resolved unexpected version: wanted=$version got=$resolved_version" >&2
@@ -2552,29 +2676,33 @@ version_marker=".crabbox-runner-version-$version-$runner_arch-sha256-$expected_s
 if [ ! -x ./config.sh ] || [ ! -f "$version_marker" ]; then
   archive="$(mktemp "${TMPDIR:-/tmp}/crabbox-actions-runner.XXXXXX.tar.gz")"
   trap 'rm -f "$archive"' EXIT
-  curl -fsSL -o "$archive" "https://github.com/actions/runner/releases/download/v${version}/${archive_name}"
+  runner_stage archive-download
+  curl --connect-timeout 15 --max-time 600 -fsSL -o "$archive" "https://github.com/actions/runner/releases/download/v${version}/${archive_name}"
+  runner_stage checksum
   actual_sha="$(sha256sum "$archive" | cut -d' ' -f1 | tr '[:upper:]' '[:lower:]')"
   if [ "$actual_sha" != "$expected_sha" ]; then
     echo "runner archive checksum mismatch: expected=$expected_sha actual=$actual_sha" >&2
     exit 1
   fi
+  runner_stage extraction
   rm -rf ./*
   tar xzf "$archive"
   rm -f "$archive"
   trap - EXIT
   touch "$version_marker"
 fi
+runner_stage configure
 if [ -f .runner ]; then
-  ./config.sh remove --unattended --token "$RUNNER_TOKEN" || true
+  timeout --kill-after=10s 120s ./config.sh remove --unattended --token "$RUNNER_TOKEN" >"$runner_dir/crabbox-config-remove.log" 2>&1 || true
 fi
 if command -v apt-get >/dev/null 2>&1 && grep -qi microsoft /proc/version 2>/dev/null; then
   sudo rm -rf /var/lib/apt/lists/*
-  sudo apt-get update >/tmp/crabbox-actions-runner-apt-update.log 2>&1
+  timeout --kill-after=10s 300s sh -c 'sudo apt-get update >/tmp/crabbox-actions-runner-apt-update.log 2>&1'
 fi
-sudo ./bin/installdependencies.sh >/tmp/crabbox-actions-runner-deps.log 2>&1 || true
+timeout --kill-after=10s 300s sudo ./bin/installdependencies.sh >/tmp/crabbox-actions-runner-deps.log 2>&1 || true
 sudo mkdir -p "$HOME/.cache/node/corepack/v1"
 sudo chown -R "$(id -u):$(id -g)" "$HOME/.cache" 2>/dev/null || true
-./config.sh --unattended --replace %s --url "https://github.com/${RUNNER_REPO}" --token "$RUNNER_TOKEN" --name "$RUNNER_NAME" --labels "$RUNNER_LABELS"
+timeout --kill-after=10s 180s ./config.sh --unattended --replace %s --url "https://github.com/${RUNNER_REPO}" --token "$RUNNER_TOKEN" --name "$RUNNER_NAME" --labels "$RUNNER_LABELS" >"$runner_dir/crabbox-config.log" 2>&1
 cat >"$HOME/actions-runner/run-crabbox.sh" <<'RUNNER'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -2600,8 +2728,10 @@ Restart=no
 [Install]
 WantedBy=multi-user.target
 SERVICE
-sudo systemctl daemon-reload
-sudo systemctl enable --now crabbox-actions-runner.service
+runner_stage service-start
+timeout --kill-after=10s 60s sudo systemctl daemon-reload
+timeout --kill-after=10s 60s sudo systemctl enable --now crabbox-actions-runner.service
+runner_stage complete
 `, shellQuote(version), ephemeralArg)
 }
 
@@ -2658,6 +2788,71 @@ func githubActionsRunnerInstallInput(repo, name, labels, token, script string) s
 	return input.String()
 }
 
+func githubActionsRunnerConfigPowerShell() string {
+	return `function Stop-CrabboxProcessTree {
+  param([int]$RootProcessId)
+  $children = @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $RootProcessId" -ErrorAction SilentlyContinue)
+  foreach ($child in $children) {
+    Stop-CrabboxProcessTree -RootProcessId ([int]$child.ProcessId)
+  }
+  Stop-Process -Id $RootProcessId -Force -ErrorAction SilentlyContinue
+}
+function Invoke-CrabboxRunnerConfig {
+  param(
+    [string[]]$Arguments,
+    [int]$TimeoutSeconds,
+    [string]$LogName,
+    [switch]$IgnoreFailure
+  )
+  $logPath = Join-Path $runnerDir $LogName
+  $pidPath = Join-Path $runnerDir ("crabbox-config-" + [Guid]::NewGuid().ToString("N") + ".pid")
+  $job = Start-Job -ScriptBlock {
+    param($WorkingDirectory, $ConfigArguments, $ProcessIdPath)
+    Set-Location -LiteralPath $WorkingDirectory
+    [System.IO.File]::WriteAllText($ProcessIdPath, [string]$PID, [System.Text.UTF8Encoding]::new($false))
+    & .\config.cmd @ConfigArguments
+    if ($LASTEXITCODE -ne 0) {
+      throw "config.cmd exited $LASTEXITCODE"
+    }
+  } -ArgumentList $runnerDir, (,$Arguments), $pidPath
+  try {
+    $timedOut = $false
+    $completed = Wait-Job -Job $job -Timeout $TimeoutSeconds
+    if ($null -eq $completed) {
+      if (Test-Path -LiteralPath $pidPath) {
+        $jobProcessId = [int]([System.IO.File]::ReadAllText($pidPath))
+        Stop-CrabboxProcessTree -RootProcessId $jobProcessId
+      }
+      Stop-Job -Job $job -ErrorAction SilentlyContinue
+      $timedOut = $true
+    }
+    $lines = @(Receive-Job -Job $job -ErrorAction Continue 2>&1 | ForEach-Object { [string]$_ })
+    if (-not [string]::IsNullOrEmpty($env:RUNNER_TOKEN)) {
+      $lines = @($lines | ForEach-Object { $_.Replace($env:RUNNER_TOKEN, "[REDACTED]") })
+    }
+    [System.IO.File]::WriteAllLines($logPath, [string[]]$lines, [System.Text.UTF8Encoding]::new($false))
+    if ($timedOut) {
+      if ($IgnoreFailure) {
+        Write-Warning "previous runner removal timed out; continuing with replace; log=$logPath"
+        return
+      }
+      throw "config.cmd timed out after $TimeoutSeconds seconds; log=$logPath"
+    }
+    if ($job.State -ne "Completed") {
+      if ($IgnoreFailure) {
+        Write-Warning "previous runner removal failed; continuing with replace; log=$logPath"
+        return
+      }
+      throw "config.cmd failed; log=$logPath"
+    }
+  } finally {
+    Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $pidPath -Force -ErrorAction SilentlyContinue
+  }
+}
+`
+}
+
 func githubActionsRunnerInstallPowerShellScript(version string, ephemeral bool) string {
 	if version == "" {
 		version = "latest"
@@ -2666,11 +2861,14 @@ func githubActionsRunnerInstallPowerShellScript(version string, ephemeral bool) 
 	if ephemeral {
 		ephemeralArg = `, "--ephemeral"`
 	}
-	return fmt.Sprintf(`$ErrorActionPreference = "Stop"
+	script := `$ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 if ([string]::IsNullOrWhiteSpace($env:RUNNER_REPO) -or [string]::IsNullOrWhiteSpace($env:RUNNER_NAME) -or [string]::IsNullOrWhiteSpace($env:RUNNER_TOKEN)) {
   throw "missing runner env"
+}
+function Write-CrabboxRunnerStage([string]$Stage) {
+  [Console]::Error.WriteLine("` + actionsRunnerStagePrefix + `" + $Stage)
 }
 $version = %s
 $arch = $env:PROCESSOR_ARCHITECTURE
@@ -2679,12 +2877,13 @@ switch -Regex ($arch) {
   "^ARM64$" { $runnerArch = "arm64"; break }
   default { throw "unsupported runner arch: $arch" }
 }
+Write-CrabboxRunnerStage "release-metadata"
 if ($version -eq "latest") {
   $releaseUri = "https://api.github.com/repos/actions/runner/releases/latest"
 } else {
   $releaseUri = "https://api.github.com/repos/actions/runner/releases/tags/v$version"
 }
-$release = Invoke-RestMethod -Uri $releaseUri -UseBasicParsing
+$release = Invoke-RestMethod -Uri $releaseUri -UseBasicParsing -TimeoutSec 60
 $resolvedVersion = ($release.tag_name -replace "^v", "")
 if ($version -ne "latest" -and $resolvedVersion -ne $version) {
   throw "runner release metadata resolved unexpected version: wanted=$version got=$resolvedVersion"
@@ -2703,15 +2902,19 @@ $expectedSha = $digestMatch.Groups["sha"].Value.ToLowerInvariant()
 $runnerDir = Join-Path $HOME "actions-runner"
 New-Item -ItemType Directory -Force -Path $runnerDir | Out-Null
 Set-Location -LiteralPath $runnerDir
+` + githubActionsRunnerConfigPowerShell() + `
 $versionMarker = ".crabbox-runner-version-$version-$runnerArch-sha256-$expectedSha"
 if (-not (Test-Path -LiteralPath ".\config.cmd") -or -not (Test-Path -LiteralPath $versionMarker)) {
   $zip = Join-Path ([IO.Path]::GetTempPath()) ("crabbox-actions-runner-" + [Guid]::NewGuid().ToString("N") + ".zip")
   try {
-    Invoke-WebRequest -Uri "https://github.com/actions/runner/releases/download/v$version/$archiveName" -OutFile $zip -UseBasicParsing
+    Write-CrabboxRunnerStage "archive-download"
+    Invoke-WebRequest -Uri "https://github.com/actions/runner/releases/download/v$version/$archiveName" -OutFile $zip -UseBasicParsing -TimeoutSec 600
+    Write-CrabboxRunnerStage "checksum"
     $actualSha = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($actualSha -ne $expectedSha) {
       throw "runner archive checksum mismatch: expected=$expectedSha actual=$actualSha"
     }
+    Write-CrabboxRunnerStage "extraction"
     Get-ChildItem -Force -LiteralPath $runnerDir | Remove-Item -Recurse -Force
     Expand-Archive -LiteralPath $zip -DestinationPath $runnerDir -Force
     New-Item -ItemType File -Path $versionMarker -Force | Out-Null
@@ -2719,13 +2922,12 @@ if (-not (Test-Path -LiteralPath ".\config.cmd") -or -not (Test-Path -LiteralPat
     Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue
   }
 }
+Write-CrabboxRunnerStage "configure"
 if (Test-Path -LiteralPath ".\.runner") {
-  & .\config.cmd remove --unattended --token $env:RUNNER_TOKEN
-  if ($LASTEXITCODE -ne 0) { Write-Warning "previous runner removal failed; continuing with replace"; $global:LASTEXITCODE = 0 }
+  Invoke-CrabboxRunnerConfig -Arguments @("remove", "--unattended", "--token", $env:RUNNER_TOKEN) -TimeoutSeconds 120 -LogName "crabbox-config-remove.log" -IgnoreFailure
 }
 $configArgs = @("--unattended", "--replace"%s, "--url", "https://github.com/$env:RUNNER_REPO", "--token", $env:RUNNER_TOKEN, "--name", $env:RUNNER_NAME, "--labels", $env:RUNNER_LABELS)
-& .\config.cmd @configArgs
-if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+Invoke-CrabboxRunnerConfig -Arguments $configArgs -TimeoutSeconds 180 -LogName "crabbox-config.log"
 $runScript = Join-Path $runnerDir "run-crabbox.ps1"
 Set-Content -Encoding UTF8 -LiteralPath $runScript -Value @'
 $ErrorActionPreference = "Stop"
@@ -2737,6 +2939,7 @@ $log = Join-Path $runnerDir "crabbox-runner.log"
 $err = Join-Path $runnerDir "crabbox-runner.err.log"
 $taskName = ("crabbox-actions-runner-" + ($env:RUNNER_NAME -replace "[^A-Za-z0-9_.-]", "-"))
 %s
+Write-CrabboxRunnerStage "service-start"
 if ($null -ne $logonValue) {
   Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
   $argument = '-NoLogo -NoProfile -ExecutionPolicy Bypass -File "' + $runScript + '"'
@@ -2751,7 +2954,9 @@ if ($null -ne $logonValue) {
   $process = Start-Process -FilePath "powershell.exe" -ArgumentList @("-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $runScript) -WorkingDirectory $runnerDir -RedirectStandardOutput $log -RedirectStandardError $err -WindowStyle Hidden -PassThru
   Write-Output ("started runner pid=" + $process.Id)
 }
-`, psQuote(version), ephemeralArg, windowsRunnerCredentialReadPowerShell(WindowsActionsRunnerCredentialPath))
+Write-CrabboxRunnerStage "complete"
+`
+	return fmt.Sprintf(script, psQuote(version), ephemeralArg, windowsRunnerCredentialReadPowerShell(WindowsActionsRunnerCredentialPath))
 }
 
 func githubActionsRegistrationToken(ctx context.Context, repo GitHubRepo, childEnvDenylist []string) (string, error) {
