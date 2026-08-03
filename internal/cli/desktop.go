@@ -648,16 +648,18 @@ func desktopTerminalCommand(target SSHTarget, command []string, opts desktopTerm
 		if len(command) > 0 {
 			shellCommand = shellJoin(command)
 		}
+		// Git for Windows runs the terminal command through the MSYS runtime,
+		// which rewrites arguments that look like POSIX paths. Without this,
+		// `cmd.exe /d /c ...` loses its switches and opens an interactive shell
+		// instead of running the requested command.
+		prefix := "export MSYS2_ARG_CONV_EXCL='*' MSYS_NO_PATHCONV=1; "
 		if opts.Sixel {
-			prefix := "export TERM=xterm-256color GIFGREP_INLINE=${GIFGREP_INLINE:-sixel}; "
-			if shellCommand == "" {
-				shellCommand = prefix + "exec /usr/bin/bash -l"
-			} else {
-				shellCommand = prefix + shellCommand
-			}
-		} else if shellCommand == "" {
+			prefix += "export TERM=xterm-256color GIFGREP_INLINE=${GIFGREP_INLINE:-sixel}; "
+		}
+		if shellCommand == "" {
 			shellCommand = "exec /usr/bin/bash -l"
 		}
+		shellCommand = prefix + shellCommand
 		return []string{
 			`C:\Program Files\Git\usr\bin\mintty.exe`,
 			"-t", opts.Title,
