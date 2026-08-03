@@ -165,6 +165,13 @@ diagnostics, video, contact-sheet, or final `proof:` output is written:
 Recording uses `--record-duration` (default 5s) and `--record-fps` (default 8),
 and requires a Linux or native Windows target as with `desktop terminal`.
 
+On Windows targets, desktop bootstrap disables the guest display and standby
+timeouts and the screensaver. A blanked virtual display freezes the framebuffer,
+so screenshots and VNC keep returning the last rendered frame and any window
+launched afterwards never appears in a capture. Because the terminal still
+starts and is recorded in metadata, the proof would otherwise report success
+while producing a stale image.
+
 Use `--publish-pr <n>` to publish the bundle through the same artifact backend
 as [`artifacts publish`](artifacts.md). The default storage is `auto`, so
 `CRABBOX_ARTIFACTS_STORAGE`/bucket/base-url env defaults still apply and a

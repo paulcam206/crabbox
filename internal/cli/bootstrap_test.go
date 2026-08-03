@@ -580,6 +580,51 @@ func TestAWSUserDataDefaultsToCloudInit(t *testing.T) {
 	}
 }
 
+// A blanked virtual display freezes the guest framebuffer, so screenshots and
+// VNC keep returning the last rendered frame. Desktop proof then produces
+// convincing but meaningless artifacts: the terminal launches and is recorded
+// in metadata, yet never appears in the capture.
+func TestWindowsDesktopBootstrapKeepsDisplayAwake(t *testing.T) {
+	script := windowsDesktopBootstrapPowerShell()
+	for _, want := range []string{
+		"monitor-timeout-ac",
+		"monitor-timeout-dc",
+		"standby-timeout-ac",
+		"standby-timeout-dc",
+		"ScreenSaveActive",
+		"ScreenSaveTimeOut",
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("windows desktop bootstrap must disable %q so the framebuffer keeps updating", want)
+		}
+	}
+	if !strings.Contains(script, `Registry::HKEY_USERS\.DEFAULT\Control Panel\Desktop`) {
+		t.Fatal("windows desktop bootstrap should also clear the screensaver for the default user hive")
+	}
+}
+
+func TestWindowsDesktopBootstrapKeepsDisplayAwakeForProviders(t *testing.T) {
+	cfg := baseConfig()
+	cfg.TargetOS = targetWindows
+	cfg.WindowsMode = windowsModeNormal
+	cfg.Desktop = true
+	cfg.WorkRoot = `C:\crabbox`
+
+	for _, tc := range []struct {
+		name   string
+		script string
+	}{
+		{name: "aws", script: windowsBootstrapPowerShell(cfg, "ssh-ed25519 test")},
+		{name: "azure", script: azureWindowsSnapshotRehydratePowerShell(cfg, "ssh-ed25519 test")},
+	} {
+		for _, want := range []string{"monitor-timeout-ac", "standby-timeout-ac", "ScreenSaveActive"} {
+			if !strings.Contains(tc.script, want) {
+				t.Fatalf("%s windows desktop bootstrap must disable %q so the framebuffer keeps updating", tc.name, want)
+			}
+		}
+	}
+}
+
 func TestAWSUserDataWindowsProfile(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Provider = "aws"
@@ -649,6 +694,9 @@ func TestAWSUserDataWindowsProfile(t *testing.T) {
 		`C:\ProgramData\crabbox\windows.username`,
 		"AutoAdminLogon",
 		"DefaultDomainName",
+		"monitor-timeout-ac",
+		"standby-timeout-ac",
+		"ScreenSaveActive",
 		"Test-Path -LiteralPath $oobe",
 		"PrivacyConsentStatus",
 		"SetupDisplayedEula",
