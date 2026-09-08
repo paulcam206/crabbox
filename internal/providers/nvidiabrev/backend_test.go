@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 func TestNvidiaBrevProviderSpec(t *testing.T) {
@@ -2031,12 +2033,9 @@ func (r *scriptedBrevRunner) joinedCalls() string {
 func isolateNvidiaBrevState(t *testing.T) (string, string) {
 	t.Helper()
 	isolateBrevContextFiles(t)
-	state := t.TempDir()
-	home := t.TempDir()
-	t.Setenv("XDG_STATE_HOME", state)
-	t.Setenv("HOME", home)
+	dirs := testutil.IsolateUserDirs(t)
 	writeBrevActiveOrg(t, "org-test")
-	return state, home
+	return dirs.StateHome, dirs.Home
 }
 
 func claimTestNvidiaBrevLeaseTargetForRepoConfig(leaseID, slug string, cfg Config, server Server, target SSHTarget, repoRoot string, reclaim bool) error {
@@ -2051,7 +2050,10 @@ func claimTestNvidiaBrevLeaseTargetForRepoConfig(leaseID, slug string, cfg Confi
 
 func writeBrevActiveOrg(t *testing.T, id string) {
 	t.Helper()
-	home := os.Getenv("HOME")
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
 	dir := filepath.Join(home, ".brev")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)

@@ -123,7 +123,7 @@ func updateLeaseClaimLabelsAndLastUsedIfUnchanged(leaseID string, expected Lease
 	return core.UpdateLeaseClaimLabelsAndLastUsedIfUnchanged(leaseID, expected, labels, lastUsed)
 }
 
-func listCloudRunSandboxLeaseClaims() ([]core.LeaseClaim, error) {
+var listCloudRunSandboxLeaseClaims = func() ([]core.LeaseClaim, error) {
 	return core.ListLeaseClaimsWithPrefix(leasePrefix)
 }
 

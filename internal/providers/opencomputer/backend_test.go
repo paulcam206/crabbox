@@ -13,7 +13,7 @@ import (
 	"net/url"
 	"os"
 	osexec "os/exec"
-	"path"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -193,7 +193,7 @@ func TestStopSurfacesMalformedExactClaimBeforeSlugFallback(t *testing.T) {
 	if err := claimLeaseForRepoProviderScopePond(leasePrefix+"sb-a-other", exactLeaseID, providerName, testOCClaimScope(f.server.URL), "", "/repo", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
-	claimPath := path.Join(os.Getenv("XDG_STATE_HOME"), "crabbox", "claims", exactLeaseID+".json")
+	claimPath := filepath.Join(openComputerClaimsDir(t), exactLeaseID+".json")
 	if err := os.WriteFile(claimPath, []byte("{"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -462,6 +462,15 @@ func newTestConfig(apiURL string) Config {
 	return cfg
 }
 
+func openComputerClaimsDir(t *testing.T) string {
+	t.Helper()
+	stateDir, err := core.CrabboxStateDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return filepath.Join(stateDir, "claims")
+}
+
 func testOCClaimScope(apiURL string) string {
 	return openComputerEndpointScope(apiURL) + "/ownership:00000000000000000000000000000000"
 }
@@ -470,8 +479,7 @@ func testOCClaimScope(apiURL string) string {
 // ~/.oc/config.json and lease store.
 func newAPIBackend(t *testing.T, f *fakeAPI) *openComputerBackend {
 	t.Helper()
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	t.Setenv("HOME", t.TempDir()) // no real ~/.oc/config.json
+	testutil.IsolateUserDirs(t) // no real ~/.oc/config.json or lease store
 	t.Setenv("CRABBOX_OPENCOMPUTER_API_KEY", "osb_testkey")
 	f.tags = map[string]string{openComputerClaimTagKey: testOCClaimScope(f.server.URL)}
 	rt := Runtime{Stdout: io.Discard, Stderr: io.Discard, HTTP: f.server.Client()}
@@ -814,8 +822,7 @@ func TestRunUsesConfiguredExecTimeout(t *testing.T) {
 
 func TestRunRequiresAPIKey(t *testing.T) {
 	f := newFakeAPI(t)
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	t.Setenv("HOME", t.TempDir())
+	testutil.IsolateUserDirs(t)
 	t.Setenv("CRABBOX_OPENCOMPUTER_API_KEY", "")
 	t.Setenv("OPENCOMPUTER_API_KEY", "")
 	rt := Runtime{Stdout: io.Discard, Stderr: io.Discard, HTTP: f.server.Client()}
@@ -1094,11 +1101,11 @@ func TestCreateSandboxReportsCleanupFailureAndSandboxID(t *testing.T) {
 	f := newFakeAPI(t)
 	f.deleteStatus = http.StatusInternalServerError
 	backend := newAPIBackend(t, f)
-	claimsPath := path.Join(os.Getenv("XDG_STATE_HOME"), "crabbox", "claims")
-	if err := os.MkdirAll(path.Dir(claimsPath), 0o700); err != nil {
+	claimsDir := openComputerClaimsDir(t)
+	if err := os.MkdirAll(claimsDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(claimsPath, []byte("not a directory"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(claimsDir, "broken.json"), []byte("{"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	api, err := newOCAPIClient(backend.cfg, backend.rt)
@@ -1112,7 +1119,7 @@ func TestCreateSandboxReportsCleanupFailureAndSandboxID(t *testing.T) {
 	if leaseID != leasePrefix+f.sandboxID || sandboxID != f.sandboxID {
 		t.Fatalf("lease=%q sandbox=%q", leaseID, sandboxID)
 	}
-	for _, want := range []string{"read claims directory", "cleanup failed", f.sandboxID, "cleanup denied"} {
+	for _, want := range []string{"parse claim", "cleanup failed", f.sandboxID, "cleanup denied"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("err=%v, want %q", err, want)
 		}
@@ -1267,8 +1274,7 @@ func TestStopPreservesClaimForAmbiguousMissingSandbox(t *testing.T) {
 // TestAPIURLPrecedenceHonorsOCConfig asserts the oc config file's api_url is
 // used before the built-in default, and that an explicit Crabbox setting wins.
 func TestAPIURLPrecedenceHonorsOCConfig(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	home := testutil.IsolateUserDirs(t).Home
 	t.Setenv("CRABBOX_OPENCOMPUTER_API_KEY", "")
 	t.Setenv("OPENCOMPUTER_API_KEY", "")
 	if err := os.MkdirAll(home+"/.oc", 0o755); err != nil {
@@ -1299,7 +1305,7 @@ func TestAPIURLPrecedenceHonorsOCConfig(t *testing.T) {
 }
 
 func TestAPIURLRejectsUnsafeCredentialDestinations(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testutil.IsolateUserDirs(t)
 	t.Setenv("CRABBOX_OPENCOMPUTER_API_KEY", "osb_test")
 	t.Setenv("OPENCOMPUTER_API_KEY", "")
 	for _, apiURL := range []string{
@@ -1318,7 +1324,7 @@ func TestAPIURLRejectsUnsafeCredentialDestinations(t *testing.T) {
 }
 
 func TestAPIURLAllowsLoopbackHTTP(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testutil.IsolateUserDirs(t)
 	t.Setenv("CRABBOX_OPENCOMPUTER_API_KEY", "osb_test")
 	t.Setenv("OPENCOMPUTER_API_KEY", "")
 	for _, apiURL := range []string{
@@ -1339,7 +1345,7 @@ func TestAPIURLAllowsLoopbackHTTP(t *testing.T) {
 }
 
 func TestAPIURLNormalizesTrailingAPISuffix(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testutil.IsolateUserDirs(t)
 	t.Setenv("CRABBOX_OPENCOMPUTER_API_KEY", "osb_test")
 	t.Setenv("OPENCOMPUTER_API_KEY", "")
 	api, err := newOCAPIClient(newTestConfig("https://api.example.test/gateway/api/"), Runtime{})
@@ -1376,7 +1382,7 @@ func TestAPIURLCanonicalizesOrigin(t *testing.T) {
 }
 
 func TestAPIClientBlocksCrossOriginRedirects(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testutil.IsolateUserDirs(t)
 	t.Setenv("CRABBOX_OPENCOMPUTER_API_KEY", "osb_test")
 	t.Setenv("OPENCOMPUTER_API_KEY", "")
 	var leaked bool
@@ -1481,7 +1487,7 @@ func TestSameOCOriginNormalizesDefaultPorts(t *testing.T) {
 }
 
 func TestControlAndExecRequestsUseOperationDeadlines(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testutil.IsolateUserDirs(t)
 	t.Setenv("CRABBOX_OPENCOMPUTER_API_KEY", "osb_test")
 	t.Setenv("OPENCOMPUTER_API_KEY", "")
 	var deadlines []time.Duration
@@ -1529,11 +1535,11 @@ func TestListFetchesClaimedHibernatedSandbox(t *testing.T) {
 	f := newFakeAPI(t)
 	f.listState = "hibernated"
 	backend := newAPIBackend(t, f)
-	claimsDir := path.Join(os.Getenv("XDG_STATE_HOME"), "crabbox", "claims")
+	claimsDir := openComputerClaimsDir(t)
 	if err := os.MkdirAll(claimsDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path.Join(claimsDir, "cbx_unrelated.json"), []byte("{"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(claimsDir, "cbx_unrelated.json"), []byte("{"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	// Unclaimed sandboxes are not inventory and do not trigger remote calls.
@@ -1596,8 +1602,8 @@ func TestListSurfacesMalformedMatchingClaim(t *testing.T) {
 	if err := claimLeaseForRepoProviderScopePond(leasePrefix+f.sandboxID, "valid", providerName, testOCClaimScope(f.server.URL), "", "/repo", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
-	claimsDir := path.Join(os.Getenv("XDG_STATE_HOME"), "crabbox", "claims")
-	if err := os.WriteFile(path.Join(claimsDir, leasePrefix+"broken.json"), []byte("{"), 0o600); err != nil {
+	claimsDir := openComputerClaimsDir(t)
+	if err := os.WriteFile(filepath.Join(claimsDir, leasePrefix+"broken.json"), []byte("{"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	_, err := backend.List(context.Background(), ListRequest{})
