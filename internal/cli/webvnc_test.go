@@ -3037,11 +3037,7 @@ func TestLegacyControllerOwnerTokenIdentityIsStaleButStoppable(t *testing.T) {
 
 func startTestWebVNCDaemonProcess(t *testing.T, nonce string) *exec.Cmd {
 	t.Helper()
-	cmd := exec.Command("sh", "-c", "while :; do sleep 1; done", "crabbox-webvnc-test", nonce)
-	configureDaemonCommand(cmd)
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
+	cmd := startPlatformWebVNCTestProcess(t, nonce)
 	t.Cleanup(func() {
 		_ = stopDaemonProcess(cmd.Process, cmd.Process.Pid)
 		_ = cmd.Wait()
